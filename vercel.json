@@ -5,25 +5,21 @@
     {
       "path": "/api/cron/daily",
       "schedule": "0 10 * * 1-5"
-    },
-    {
-      "path": "/api/cron/scan",
-      "schedule": "*/5 4-10 * * 1-5"
     }
   ],
   "rewrites": [
-    { "source": "/api/month/start",               "destination": "/api/monthly/setup" },
-    { "source": "/api/portfolio",                  "destination": "/api/portfolio/index" },
-    { "source": "/api/recommendations",            "destination": "/api/recommendations/index" },
-    { "source": "/api/recommendation/purchased",   "destination": "/api/recommendation/purchased" },
-    { "source": "/api/recommendation/skipped",     "destination": "/api/recommendation/skipped" },
-    { "source": "/api/open-positions",             "destination": "/api/positions/index" },
-    { "source": "/api/position/exit",              "destination": "/api/position/exit" },
-    { "source": "/api/position/hold",              "destination": "/api/position/hold" },
-    { "source": "/api/daily-report",               "destination": "/api/reports/daily" },
-    { "source": "/api/weekly-report",              "destination": "/api/reports/weekly" },
-    { "source": "/api/missed-trades",              "destination": "/api/missed-trades/index" },
-    { "source": "/api/scan-market",                "destination": "/api/scan/index" },
-    { "source": "/api/register-device",            "destination": "/api/notifications/register" }
+    { "source": "/api/month/start", "destination": "/api/monthly/setup" },
+    { "source": "/api/portfolio", "destination": "/api/portfolio/index" },
+    { "source": "/api/recommendations", "destination": "/api/recommendations/index" },
+    { "source": "/api/recommendation/purchased", "destination": "/api/recommendation/purchased" },
+    { "source": "/api/recommendation/skipped", "destination": "/api/recommendation/skipped" },
+    { "source": "/api/open-positions", "destination": "/api/positions/index" },
+    { "source": "/api/position/exit", "destination": "/api/position/exit" },
+    { "source": "/api/position/hold", "destination": "/api/position/hold" },
+    { "source": "/api/daily-report", "destination": "/api/reports/daily" },
+    { "source": "/api/weekly-report", "destination": "/api/reports/weekly" },
+    { "source": "/api/missed-trades", "destination": "/api/missed-trades/index" },
+    { "source": "/api/scan-market", "destination": "/api/scan/index" },
+    { "source": "/api/register-device", "destination": "/api/notifications/register" }
   ]
 }

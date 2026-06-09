@@ -8,7 +8,7 @@
     },
     {
       "path": "/api/cron/scan",
-      "schedule": "* * * * 1-5"
+      "schedule": "*/5 4-10 * * 1-5"
     }
   ],
   "rewrites": [

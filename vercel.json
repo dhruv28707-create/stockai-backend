@@ -1,6 +1,6 @@
 {
   "version": 2,
-  "buildCommand": "tsx --noEmit",
+  "buildCommand": "npm run build",
   "crons": [
     {
       "path": "/api/cron/daily",

@@ -15,14 +15,15 @@
     "rootDir": "."
   },
   "include": [
-    "api/**/*.ts",
-    "config/**/*.ts",
-    "cron/**/*.ts",
-    "firebase/**/*.ts",
-    "models/**/*.ts",
-    "services/**/*.ts",
-    "types/**/*.ts",
-    "utils/**/*.ts"
-  ],
+  "api/**/*.ts",
+  "src/**/*.ts",
+  "config/**/*.ts",
+  "cron/**/*.ts",
+  "firebase/**/*.ts",
+  "models/**/*.ts",
+  "services/**/*.ts",
+  "types/**/*.ts",
+  "utils/**/*.ts"
+],
   "exclude": ["node_modules", "dist"]
 }

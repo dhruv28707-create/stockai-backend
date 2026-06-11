@@ -1,5 +1,3 @@
-// eslint-disable-next-line @typescript-eslint/ban-ts-comment
-// @ts-expect-error — yahoo-finance2 ships CJS; types resolve at runtime
 import yahooFinance from "yahoo-finance2";
 
 import { logger } from "../utils/logger.js";

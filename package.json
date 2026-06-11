@@ -2,7 +2,6 @@
   "name": "android-ai-stock-assistant-backend",
   "version": "0.1.0",
   "private": true,
-  "type": "module",
   "description": "Node.js + TypeScript backend scaffold for a single-user Android AI Stock Assistant.",
   "main": "dist/index.js",
   "scripts": {

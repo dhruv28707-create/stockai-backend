@@ -4,7 +4,7 @@
   "outputDirectory": ".",
   "functions": {
     "api/index.ts": {
-      "includeFiles": "node_modules/**"
+      "includeFiles": "node_modules/yahoo-finance2/**"
     }
   },
   "crons": [

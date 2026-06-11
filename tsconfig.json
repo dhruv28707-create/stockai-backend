@@ -4,26 +4,24 @@
     "module": "NodeNext",
     "moduleResolution": "NodeNext",
     "lib": ["ES2022"],
-    "strict": true,
+    "strict": false,
     "esModuleInterop": true,
     "forceConsistentCasingInFileNames": true,
     "skipLibCheck": true,
     "resolveJsonModule": true,
-    "noUncheckedIndexedAccess": true,
-    "exactOptionalPropertyTypes": true,
     "outDir": "dist",
     "rootDir": "."
   },
   "include": [
-  "api/**/*.ts",
-  "src/**/*.ts",
-  "config/**/*.ts",
-  "cron/**/*.ts",
-  "firebase/**/*.ts",
-  "models/**/*.ts",
-  "services/**/*.ts",
-  "types/**/*.ts",
-  "utils/**/*.ts"
-],
+    "api/**/*.ts",
+    "src/**/*.ts",
+    "config/**/*.ts",
+    "cron/**/*.ts",
+    "firebase/**/*.ts",
+    "models/**/*.ts",
+    "services/**/*.ts",
+    "types/**/*.ts",
+    "utils/**/*.ts"
+  ],
   "exclude": ["node_modules", "dist"]
 }

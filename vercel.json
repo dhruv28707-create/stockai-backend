@@ -1,10 +1,10 @@
 {
   "version": 2,
-  "buildCommand": "npm install",
+  "buildCommand": "",
   "outputDirectory": ".",
   "functions": {
     "api/index.ts": {
-      "includeFiles": "node_modules/yahoo-finance2/**"
+      "includeFiles": "node_modules/**"
     }
   },
   "crons": [

@@ -4,7 +4,7 @@ import { env } from "../../../config/env.js";
 import { NotificationService } from "../../../services/notificationService.js";
 import type { ApiHandler } from "../../../types/api.js";
 import { sendError, sendJson } from "../../../utils/http.js";
-import { logger } from "../../../utils/logger.js";
+import { logger, toErrorContext } from "../../../utils/logger.js";
 
 const bodySchema = z.object({
   symbol: z.string().trim().min(1).toUpperCase(),
@@ -75,9 +75,7 @@ const handler: ApiHandler = async (request, response) => {
       }
     });
   } catch (err) {
-    logger.error("EXIT notification endpoint error", {
-      error: err instanceof Error ? err.message : String(err)
-    });
+    logger.error("EXIT notification endpoint error", { ...toErrorContext(err) });
     sendError(response, 500, "internal_error", "Failed to send EXIT notification.");
   }
 };

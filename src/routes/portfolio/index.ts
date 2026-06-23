@@ -4,7 +4,7 @@ import { FirestoreService } from "../../../services/firestoreService.js";
 import { MonthlySetupService } from "../../../services/monthlySetupService.js";
 import type { ApiHandler } from "../../../types/api.js";
 import { sendError, sendJson } from "../../../utils/http.js";
-import { logger } from "../../../utils/logger.js";
+import { logger, toErrorContext } from "../../../utils/logger.js";
 
 /**
  * GET /api/portfolio
@@ -24,6 +24,12 @@ const handler: ApiHandler = async (request, response) => {
     return;
   }
 
+  const withLabel = <T>(label: string, promise: Promise<T>): Promise<T> =>
+    promise.catch((cause: unknown) => {
+      logger.error(`Portfolio sub-query failed: ${label}`, { ...toErrorContext(cause) });
+      throw new Error(`Portfolio sub-query failed: ${label}`);
+    });
+
   try {
     const db = new FirestoreService();
     const monthlySetupSvc = new MonthlySetupService();
@@ -31,16 +37,16 @@ const handler: ApiHandler = async (request, response) => {
     const month = new Date().toISOString().slice(0, 7); // YYYY-MM
 
     const [monthlySetup, openPositionsSnap, portfolioSnap] = await Promise.all([
-      monthlySetupSvc.getSetup(userId, month),
-      db.client
+      withLabel("monthlySetup", monthlySetupSvc.getSetup(userId, month)),
+      withLabel("openPositions", db.client
         .collection(collectionNames.positions)
         .where("userId", "==", userId)
-        .get(),
-      db.client
+        .get()),
+      withLabel("portfolio", db.client
         .collection(collectionNames.portfolio)
         .where("userId", "==", userId)
         .limit(1)
-        .get()
+        .get())
     ]);
 
     const openPositions = openPositionsSnap.docs.map((d) => d.data());
@@ -56,10 +62,9 @@ const handler: ApiHandler = async (request, response) => {
       }
     });
   } catch (err) {
-    logger.error("GET /api/portfolio failed", {
-      error: err instanceof Error ? err.message : String(err)
-    });
-    sendError(response, 500, "internal_error", "Failed to fetch portfolio.");
+    logger.error("GET /api/portfolio failed", { ...toErrorContext(err) });
+    const message = err instanceof Error ? err.message : "Failed to fetch portfolio.";
+    sendError(response, 500, "internal_error", message);
   }
 };
 

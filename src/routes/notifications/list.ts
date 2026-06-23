@@ -5,7 +5,7 @@ import { collectionNames } from "../../../models/index.js";
 import { FirestoreService } from "../../../services/firestoreService.js";
 import type { ApiHandler } from "../../../types/api.js";
 import { sendError, sendJson } from "../../../utils/http.js";
-import { logger } from "../../../utils/logger.js";
+import { logger, toErrorContext } from "../../../utils/logger.js";
 
 const querySchema = z.object({
   limit: z.coerce.number().int().positive().max(100).default(30),
@@ -61,9 +61,7 @@ const handler: ApiHandler = async (request, response) => {
 
     sendJson(response, 200, { data: { items, count: items.length } });
   } catch (err) {
-    logger.error("GET /api/notifications failed", {
-      error: err instanceof Error ? err.message : String(err)
-    });
+    logger.error("GET /api/notifications failed", { ...toErrorContext(err) });
     sendError(response, 500, "internal_error", "Failed to fetch notifications.");
   }
 };

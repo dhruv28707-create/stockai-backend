@@ -6,7 +6,7 @@ import { FirestoreService } from "../../../services/firestoreService.js";
 import { MonthlySetupService } from "../../../services/monthlySetupService.js";
 import type { ApiHandler } from "../../../types/api.js";
 import { sendError, sendJson } from "../../../utils/http.js";
-import { logger } from "../../../utils/logger.js";
+import { logger, toErrorContext } from "../../../utils/logger.js";
 import { Timestamp } from "firebase-admin/firestore";
 
 const bodySchema = z.object({
@@ -100,9 +100,7 @@ const handler: ApiHandler = async (request, response) => {
       }
     });
   } catch (err) {
-    logger.error("POST /api/recommendation/skipped failed", {
-      error: err instanceof Error ? err.message : String(err)
-    });
+    logger.error("POST /api/recommendation/skipped failed", { ...toErrorContext(err) });
     sendError(response, 500, "internal_error", "Failed to record skip.");
   }
 };

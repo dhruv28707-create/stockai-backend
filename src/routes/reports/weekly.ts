@@ -4,7 +4,7 @@ import { env } from "../../../config/env.js";
 import { ReportService } from "../../../services/reportService.js";
 import type { ApiHandler } from "../../../types/api.js";
 import { sendError, sendJson } from "../../../utils/http.js";
-import { logger } from "../../../utils/logger.js";
+import { logger, toErrorContext } from "../../../utils/logger.js";
 
 const querySchema = z.object({
   date: z.string().trim().date().optional()
@@ -41,9 +41,7 @@ const handler: ApiHandler = async (request, response) => {
     const report = await service.generateWeeklyReport(userId, parsed.data.date);
     sendJson(response, 200, { data: report });
   } catch (err) {
-    logger.error("Failed to generate weekly report", {
-      error: err instanceof Error ? err.message : String(err)
-    });
+    logger.error("Failed to generate weekly report", { ...toErrorContext(err) });
     sendError(response, 500, "internal_error", "Failed to generate weekly report.");
   }
 };

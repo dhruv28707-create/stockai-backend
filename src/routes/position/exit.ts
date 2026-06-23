@@ -7,7 +7,7 @@ import { FirestoreService } from "../../../services/firestoreService.js";
 import { MonthlySetupService } from "../../../services/monthlySetupService.js";
 import type { ApiHandler } from "../../../types/api.js";
 import { sendError, sendJson } from "../../../utils/http.js";
-import { logger } from "../../../utils/logger.js";
+import { logger, toErrorContext } from "../../../utils/logger.js";
 
 const bodySchema = z.object({
   positionId: z.string().trim().min(1),
@@ -140,9 +140,7 @@ const handler: ApiHandler = async (request, response) => {
       }
     });
   } catch (err) {
-    logger.error("POST /api/position/exit failed", {
-      error: err instanceof Error ? err.message : String(err)
-    });
+    logger.error("POST /api/position/exit failed", { ...toErrorContext(err) });
     sendError(response, 500, "internal_error", "Failed to exit position.");
   }
 };

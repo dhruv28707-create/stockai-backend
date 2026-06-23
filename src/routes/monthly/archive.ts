@@ -5,7 +5,7 @@ import { yearMonthSchema } from "../../../models";
 import { MonthlySetupService } from "../../../services/monthlySetupService";
 import type { ApiHandler } from "../../../types/api";
 import { sendError, sendJson } from "../../../utils/http";
-import { logger } from "../../../utils/logger";
+import { logger, toErrorContext } from "../../../utils/logger";
 
 const bodySchema = z.object({
   month: yearMonthSchema
@@ -51,9 +51,7 @@ const handler: ApiHandler = async (request, response) => {
 
     sendJson(response, 200, { data: result.setup });
   } catch (err) {
-    logger.error("Failed to archive month", {
-      error: err instanceof Error ? err.message : String(err)
-    });
+    logger.error("Failed to archive month", { ...toErrorContext(err) });
     sendError(response, 500, "internal_error", "Failed to archive month.");
   }
 };

@@ -14,7 +14,7 @@ import type { MissedTradeDocument } from "../models/missedTrade.js";
 import type { PositionDocument } from "../models/position.js";
 import type { RecommendationDocument } from "../models/recommendation.js";
 import type { TradeDocument } from "../models/trade.js";
-import { logger } from "../utils/logger.js";
+import { logger, toErrorContext } from "../utils/logger.js";
 import { FirestoreService } from "./firestoreService.js";
 import { MarketDataService } from "./marketDataService.js";
 import { MonthlySetupService } from "./monthlySetupService.js";
@@ -75,6 +75,14 @@ export class ReportService {
   private readonly db = new FirestoreService();
   private readonly marketData = new MarketDataService();
   private readonly monthlySetup = new MonthlySetupService();
+
+  // ── Helper: wraps a promise so rejections are logged with a label ─────────
+
+  private withLabel = <T>(label: string, promise: Promise<T>): Promise<T> =>
+    promise.catch((cause: unknown) => {
+      logger.error(`Report sub-query failed: ${label}`, { ...toErrorContext(cause) });
+      throw new Error(`Report sub-query failed: ${label}`);
+    });
 
   // ── Data fetchers ──────────────────────────────────────────────────────────
 
@@ -312,12 +320,12 @@ export class ReportService {
       allFilledTrades,
       monthlySetup
     ] = await Promise.all([
-      this.getTradesForPeriod(userId, reportDate, reportDate),
-      this.getOpenPositions(userId),
-      this.getRecommendationsForDate(userId, reportDate),
-      this.getMissedTradesForPeriod(userId, reportDate, reportDate),
-      this.getAllFilledTrades(userId),
-      this.monthlySetup.getSetup(userId, month)
+      this.withLabel("tradesForDay", this.getTradesForPeriod(userId, reportDate, reportDate)),
+      this.withLabel("openPositions", this.getOpenPositions(userId)),
+      this.withLabel("recommendationsForDay", this.getRecommendationsForDate(userId, reportDate)),
+      this.withLabel("missedTradesForDay", this.getMissedTradesForPeriod(userId, reportDate, reportDate)),
+      this.withLabel("allFilledTrades", this.getAllFilledTrades(userId)),
+      this.withLabel("monthlySetup", this.monthlySetup.getSetup(userId, month))
     ]);
 
     // Closed positions P&L
@@ -463,11 +471,11 @@ export class ReportService {
       allFilledTrades,
       monthlySetup
     ] = await Promise.all([
-      this.getTradesForPeriod(userId, weekStart, weekEnd),
-      this.getOpenPositions(userId),
-      this.getMissedTradesForPeriod(userId, weekStart, weekEnd),
-      this.getAllFilledTrades(userId),
-      this.monthlySetup.getSetup(userId, month)
+      this.withLabel("tradesForWeek", this.getTradesForPeriod(userId, weekStart, weekEnd)),
+      this.withLabel("openPositions", this.getOpenPositions(userId)),
+      this.withLabel("missedTradesForWeek", this.getMissedTradesForPeriod(userId, weekStart, weekEnd)),
+      this.withLabel("allFilledTrades", this.getAllFilledTrades(userId)),
+      this.withLabel("monthlySetup", this.monthlySetup.getSetup(userId, month))
     ]);
 
     // Weekly P&L

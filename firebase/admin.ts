@@ -23,11 +23,22 @@ export const getFirebaseApp = (): App => {
     throw new Error("Firebase service account environment variables are missing.");
   }
 
+  const normalizedKey = formatPrivateKey(env.FIREBASE_PRIVATE_KEY).trim();
+
+  if (
+    !normalizedKey.startsWith("-----BEGIN PRIVATE KEY-----") ||
+    !normalizedKey.endsWith("-----END PRIVATE KEY-----")
+  ) {
+    throw new Error(
+      "FIREBASE_PRIVATE_KEY is malformed — expected PEM format after newline normalization."
+    );
+  }
+
   return initializeApp({
     credential: cert({
       projectId: env.FIREBASE_PROJECT_ID,
       clientEmail: env.FIREBASE_CLIENT_EMAIL,
-      privateKey: formatPrivateKey(env.FIREBASE_PRIVATE_KEY)
+      privateKey: normalizedKey
     })
   });
 };

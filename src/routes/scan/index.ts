@@ -2,7 +2,7 @@ import { env } from "../../../config/env.js";
 import { ScannerService } from "../../../services/scannerService.js";
 import type { ApiHandler } from "../../../types/api.js";
 import { sendError, sendJson } from "../../../utils/http.js";
-import { logger } from "../../../utils/logger.js";
+import { logger, toErrorContext } from "../../../utils/logger.js";
 
 /**
  * POST /api/scan-market
@@ -28,9 +28,7 @@ const handler: ApiHandler = async (request, response) => {
 
     sendJson(response, 200, { data: summary });
   } catch (err) {
-    logger.error("POST /api/scan-market failed", {
-      error: err instanceof Error ? err.message : String(err)
-    });
+    logger.error("POST /api/scan-market failed", { ...toErrorContext(err) });
     sendError(response, 500, "internal_error", "Market scan failed.");
   }
 };

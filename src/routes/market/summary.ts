@@ -1,15 +1,15 @@
 import { MarketDataService } from "../../../services/marketDataService.js";
 import type { ApiHandler } from "../../../types/api.js";
 import { sendError, sendJson } from "../../../utils/http.js";
-import { logger } from "../../../utils/logger.js";
+import { logger, toErrorContext } from "../../../utils/logger.js";
 
-// NSE index tickers on yahoo-finance2
+// NSE index tickers
 const INDEX_SYMBOLS = [
   { ticker: "^NSEI", name: "NIFTY 50" },
   { ticker: "^NSEBANK", name: "BANK NIFTY" }
 ];
 
-// Top liquid NSE stocks to scan for gainers/losers
+// Small list — keeps cold-start fast, avoids timeouts
 const MOVER_SYMBOLS = [
   "RELIANCE.NS",
   "TCS.NS",
@@ -20,26 +20,13 @@ const MOVER_SYMBOLS = [
   "ITC.NS",
   "SBIN.NS",
   "BHARTIARTL.NS",
-  "KOTAKBANK.NS",
-  "LT.NS",
-  "HCLTECH.NS",
-  "AXISBANK.NS",
-  "MARUTI.NS",
-  "SUNPHARMA.NS",
-  "TITAN.NS",
-  "BAJFINANCE.NS",
-  "WIPRO.NS",
-  "TATAMOTORS.NS",
-  "ONGC.NS"
+  "KOTAKBANK.NS"
 ];
 
 /**
  * GET /api/market/summary
- *
- * Returns:
- * - Market status (OPEN / CLOSED based on IST time)
- * - NIFTY 50 and BANK NIFTY index data
- * - Top 5 gainers and top 5 losers from liquid NSE stocks
+ * Returns market status, index values, top gainers and losers.
+ * Uses fetchSymbol (quote only — no candles) to stay fast on serverless.
  */
 const handler: ApiHandler = async (request, response) => {
   if (request.method !== "GET") {
@@ -48,57 +35,68 @@ const handler: ApiHandler = async (request, response) => {
   }
 
   try {
-    const marketSvc = new MarketDataService();
+    const svc = new MarketDataService();
 
-    // Fetch indices and movers in parallel
-    const [indexResults, moverResults] = await Promise.all([
-      marketSvc.fetchBatch(INDEX_SYMBOLS.map((i) => i.ticker)),
-      marketSvc.fetchBatch(MOVER_SYMBOLS)
-    ]);
+    // Fetch all symbols in parallel — quote only, much faster than fetchBatch
+    const allSymbols = [...INDEX_SYMBOLS.map((i) => i.ticker), ...MOVER_SYMBOLS];
+    const results = await Promise.allSettled(
+      allSymbols.map((ticker) => svc.fetchSymbol(ticker))
+    );
 
-    // Build index objects
-    const indices = indexResults.map((result) => {
-      const label =
-        INDEX_SYMBOLS.find((i) => i.ticker === result.symbol)?.name ?? result.symbol;
-      const q = result.quote;
+    // Map results by ticker
+    const byTicker: Record<
+      string,
+      { price: number; previousClose: number; volume: number }
+    > = {};
+    allSymbols.forEach((ticker, i) => {
+      const r = results[i];
+      if (r.status === "fulfilled" && r.value) {
+        byTicker[ticker] = {
+          price: r.value.quote.price,
+          previousClose: r.value.quote.previousClose,
+          volume: r.value.quote.volume
+        };
+      }
+    });
+
+    // Build indices
+    const indices = INDEX_SYMBOLS.filter((i) => byTicker[i.ticker]).map((i) => {
+      const q = byTicker[i.ticker];
       const change = parseFloat((q.price - q.previousClose).toFixed(2));
       const changePercent = parseFloat(((change / q.previousClose) * 100).toFixed(2));
       return {
-        name: label,
+        name: i.name,
         value: q.price,
         change,
         changePercent,
-        previousClose: q.previousClose,
-        volume: q.volume,
-        timestamp: new Date().toISOString()
+        previousClose: q.previousClose
       };
     });
 
-    // Build movers list
-    const movers = moverResults.map((result) => {
-      const q = result.quote;
+    // Build movers
+    const movers = MOVER_SYMBOLS.filter((ticker) => byTicker[ticker]).map((ticker) => {
+      const q = byTicker[ticker];
       const change = parseFloat((q.price - q.previousClose).toFixed(2));
       const changePercent = parseFloat(((change / q.previousClose) * 100).toFixed(2));
-      // Strip ".NS" suffix for display
-      const symbol = result.symbol.replace(".NS", "").replace(".BO", "");
-      return { symbol, price: q.price, change, changePercent, volume: q.volume };
+      return { symbol: ticker.replace(".NS", ""), price: q.price, change, changePercent };
     });
 
     const topGainers = [...movers]
       .sort((a, b) => b.changePercent - a.changePercent)
       .slice(0, 5);
-
     const topLosers = [...movers]
       .sort((a, b) => a.changePercent - b.changePercent)
       .slice(0, 5);
 
-    // Determine market status using IST (UTC+5:30)
-    const now = new Date();
-    const istHour = ((now.getUTCHours() + 5) % 24) + (now.getUTCMinutes() >= 30 ? 0 : 0);
-    const istMinutes = (now.getUTCHours() * 60 + now.getUTCMinutes() + 330) % (24 * 60);
-    const marketOpen = istMinutes >= 555 && istMinutes < 930; // 9:15 AM to 3:30 PM IST
-    const preOpen = istMinutes >= 540 && istMinutes < 555; // 9:00–9:15 AM
-    const status = preOpen ? "PRE_OPEN" : marketOpen ? "OPEN" : "CLOSED";
+    // Market status in IST
+    const istMinutes =
+      (new Date().getUTCHours() * 60 + new Date().getUTCMinutes() + 330) % 1440;
+    const status =
+      istMinutes >= 555 && istMinutes < 930
+        ? "OPEN"
+        : istMinutes >= 540 && istMinutes < 555
+          ? "PRE_OPEN"
+          : "CLOSED";
 
     sendJson(response, 200, {
       data: {
@@ -110,9 +108,7 @@ const handler: ApiHandler = async (request, response) => {
       }
     });
   } catch (err) {
-    logger.error("GET /api/market/summary failed", {
-      error: err instanceof Error ? err.message : String(err)
-    });
+    logger.error("GET /api/market/summary failed", { ...toErrorContext(err) });
     sendError(response, 500, "internal_error", "Failed to fetch market summary.");
   }
 };

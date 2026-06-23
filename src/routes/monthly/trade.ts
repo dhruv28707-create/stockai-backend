@@ -5,7 +5,7 @@ import { yearMonthSchema } from "../../../models";
 import { MonthlySetupService } from "../../../services/monthlySetupService";
 import type { ApiHandler } from "../../../types/api";
 import { sendError, sendJson } from "../../../utils/http";
-import { logger } from "../../../utils/logger";
+import { logger, toErrorContext } from "../../../utils/logger";
 
 /**
  * POST /api/monthly/trade
@@ -125,7 +125,7 @@ const handler: ApiHandler = async (request, response) => {
   } catch (err) {
     logger.error("Trade action failed", {
       action: body.action,
-      error: err instanceof Error ? err.message : String(err)
+      ...toErrorContext(err)
     });
     sendError(response, 500, "internal_error", "Trade action failed.");
   }

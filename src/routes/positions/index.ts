@@ -4,7 +4,7 @@ import { FirestoreService } from "../../../services/firestoreService.js";
 import { MarketDataService } from "../../../services/marketDataService.js";
 import type { ApiHandler } from "../../../types/api.js";
 import { sendError, sendJson } from "../../../utils/http.js";
-import { logger } from "../../../utils/logger.js";
+import { logger, toErrorContext } from "../../../utils/logger.js";
 
 /**
  * GET /api/open-positions
@@ -57,9 +57,7 @@ const handler: ApiHandler = async (request, response) => {
       data: { positions: enriched, count: enriched.length, totalUnrealisedPnL }
     });
   } catch (err) {
-    logger.error("GET /api/open-positions failed", {
-      error: err instanceof Error ? err.message : String(err)
-    });
+    logger.error("GET /api/open-positions failed", { ...toErrorContext(err) });
     sendError(response, 500, "internal_error", "Failed to fetch open positions.");
   }
 };

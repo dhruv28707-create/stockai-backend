@@ -43,6 +43,12 @@ export const getFirebaseApp = (): App => {
   });
 };
 
-export const getDb = (): Firestore => getFirestore(getFirebaseApp());
+// KEY FIX: this project's Firestore database was created with the
+// database ID "default" (plain text), not the SDK's reserved "(default)"
+// database. getFirestore(app) with no second argument always targets
+// "(default)" — that mismatch caused every query to fail with
+// "5 NOT_FOUND" even though credentials and permissions were correct.
+// Passing the database ID explicitly fixes this.
+export const getDb = (): Firestore => getFirestore(getFirebaseApp(), "default");
 
 export const getFcm = (): Messaging => getMessaging(getFirebaseApp());

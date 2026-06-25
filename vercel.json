@@ -4,16 +4,20 @@
   "outputDirectory": ".",
   "functions": {
     "api/index.ts": {
-      "includeFiles": "node_modules/yahoo-finance2/**"
+      "includeFiles": "node_modules/yahoo-finance2/**",
+      "maxDuration": 60
     }
   },
   "crons": [
     {
-      "path": "/api/cron/daily",
-      "schedule": "0 10 * * 1-5"
+      "path": "/api/cron/scan",
+      "schedule": "0 4,7 * * 1-5"
     }
   ],
   "rewrites": [
-    { "source": "/api/(.*)", "destination": "/api/index" }
+    {
+      "source": "/api/(.*)",
+      "destination": "/api/index"
+    }
   ]
 }

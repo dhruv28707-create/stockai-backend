@@ -42,8 +42,12 @@ const handler: ApiHandler = async (request, response) => {
   const rawBody = (request as any).body as unknown;
   const parsed = bodySchema.safeParse(rawBody);
   if (!parsed.success) {
-    sendError(response, 400, "validation_error",
-      parsed.error.issues.map((i) => i.message).join(", "));
+    sendError(
+      response,
+      400,
+      "validation_error",
+      parsed.error.issues.map((i) => i.message).join(", ")
+    );
     return;
   }
 
@@ -54,6 +58,22 @@ const handler: ApiHandler = async (request, response) => {
   try {
     const db = new FirestoreService();
     const monthlySetupSvc = new MonthlySetupService();
+
+    // KEY ADDITION: fetch the original recommendation first so we can
+    // carry its target/stoploss metadata onto the new position — without
+    // this, the position-check cron job would have nothing reliable to
+    // compare the live price against.
+    const recSnap = await db.client
+      .collection(collectionNames.recommendations)
+      .doc(recommendationId)
+      .get();
+    const recMetadata = recSnap.exists
+      ? (recSnap.data()?.metadata as Record<string, unknown> | undefined)
+      : undefined;
+    const targetPrice =
+      typeof recMetadata?.target === "number" ? recMetadata.target : undefined;
+    const stopLoss =
+      typeof recMetadata?.stoploss === "number" ? recMetadata.stoploss : undefined;
 
     // 1. Deduct capital — validates limits
     const capitalResult = await monthlySetupSvc.purchaseTrade({
@@ -99,6 +119,8 @@ const handler: ApiHandler = async (request, response) => {
       status: "open",
       tradeId: tradeRef.id,
       recommendationId,
+      targetPrice,
+      stopLoss,
       createdAt: now,
       updatedAt: now
     });
@@ -129,5 +151,3 @@ const handler: ApiHandler = async (request, response) => {
 };
 
 export default handler;
-
-

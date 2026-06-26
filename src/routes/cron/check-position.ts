@@ -1,14 +1,15 @@
-import { runMarketScan } from "../../../cron/scannerRun";
+import { runPositionCheck } from "../../../cron/positionCheckRun";
 import type { ApiHandler } from "../../../types/api";
 import { isAuthorizedCronRequest } from "../../../utils/auth";
 import { sendError, sendJson } from "../../../utils/http";
 
 /**
- * GET /api/cron/scan
+ * GET /api/cron/check-positions
  *
- * Called once daily by Vercel cron (Vercel Hobby plan limit).
- * Scans the entire watchlist (all batches) in one call.
- * Fires BUY / EXIT recommendations + FCM push when confidence >= 80%.
+ * Called once daily by Vercel cron, separate from /api/cron/scan.
+ * Only checks YOUR open positions against their target/stoploss —
+ * much faster than a full watchlist scan since it's just a handful
+ * of symbols, not the full ~150-stock watchlist.
  */
 const handler: ApiHandler = async (request, response) => {
   if (request.method !== "GET") {
@@ -21,7 +22,7 @@ const handler: ApiHandler = async (request, response) => {
     return;
   }
 
-  await runMarketScan();
+  await runPositionCheck();
 
   sendJson(response, 200, { data: { status: "accepted" } });
 };

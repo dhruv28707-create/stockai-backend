@@ -11,7 +11,11 @@
   "crons": [
     {
       "path": "/api/cron/scan",
-      "schedule": "0 4,7 * * 1-5"
+      "schedule": "15 4 * * 1-5"
+    },
+    {
+      "path": "/api/cron/check-positions",
+      "schedule": "0 8 * * 1-5"
     }
   ],
   "rewrites": [

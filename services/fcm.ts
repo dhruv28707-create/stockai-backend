@@ -84,11 +84,9 @@ export async function sendPushNotification(
 ): Promise<{ sent: boolean; hasToken: boolean; messageId?: string; error?: string }> {
   const token = await resolveDeviceToken();
   const metadata: PushMetadata = { type, priority, symbol, actionUrl };
-  const notificationRef = getDb().collection(collectionNames.notifications).doc();
 
   if (!token) {
-    await notificationRef.set({
-      id: notificationRef.id,
+    await logNotification({
       userId: env.SINGLE_USER_ID,
       title,
       body,
@@ -122,8 +120,7 @@ export async function sendPushNotification(
       }
     });
 
-    await notificationRef.set({
-      id: notificationRef.id,
+    await logNotification({
       userId: env.SINGLE_USER_ID,
       title,
       body,
@@ -142,8 +139,7 @@ export async function sendPushNotification(
     const errorMessage = error instanceof Error ? error.message : String(error);
     const errorCode = getErrorCode(error);
 
-    await notificationRef.set({
-      id: notificationRef.id,
+    await logNotification({
       userId: env.SINGLE_USER_ID,
       title,
       body,
@@ -162,6 +158,15 @@ export async function sendPushNotification(
       hasToken: true,
       error: errorCode ? `${errorCode}: ${errorMessage}` : errorMessage
     };
+  }
+}
+
+async function logNotification(data: Record<string, unknown>): Promise<void> {
+  try {
+    const notificationRef = getDb().collection(collectionNames.notifications).doc();
+    await notificationRef.set({ id: notificationRef.id, ...data });
+  } catch {
+    // Notification delivery result is more important than history logging.
   }
 }
 

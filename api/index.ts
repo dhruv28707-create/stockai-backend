@@ -193,8 +193,18 @@ const testNotificationHandler = async (req: Request, res: Response) => {
         ? "Test notification sent."
         : getNotificationFailureMessage(result.error, tokenStatusBeforeSend.hasToken)
     });
-  } catch {
-    sendError(res, 500, "Failed to send test notification");
+  } catch (error) {
+    sendSuccess(
+      res,
+      {
+        sent: false,
+        hasToken: false,
+        error: getErrorMessage(error),
+        errorCode: getErrorCode(error),
+        message: "Test notification crashed before FCM returned a send result."
+      },
+      200
+    );
   }
 };
 
@@ -433,6 +443,23 @@ function getNotificationFailureMessage(error: string | undefined, hadToken: bool
   }
 
   return error ?? "FCM rejected the test notification.";
+}
+
+function getErrorMessage(error: unknown): string {
+  return error instanceof Error ? error.message : String(error);
+}
+
+function getErrorCode(error: unknown): string | undefined {
+  if (
+    typeof error === "object" &&
+    error !== null &&
+    "code" in error &&
+    typeof error.code === "string"
+  ) {
+    return error.code;
+  }
+
+  return undefined;
 }
 
 function isAuthorizedCronRequest(req: Request): boolean {

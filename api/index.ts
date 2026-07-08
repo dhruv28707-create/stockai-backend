@@ -180,8 +180,8 @@ const testNotificationHandler = async (req: Request, res: Response) => {
     const result = await sendPushNotification(
       getStringFromRequest(req, "title") ?? "StockAI test notification",
       getStringFromRequest(req, "body") ?? "Your Firebase notification setup is connected.",
-      "MARKET_SUMMARY",
-      "LOW"
+      "BUY_ALERT",
+      "HIGH"
     );
     const tokenStatusAfterSend = await getNotificationTokenStatus();
 

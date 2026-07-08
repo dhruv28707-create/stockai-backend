@@ -84,6 +84,7 @@ export async function sendPushNotification(
 ): Promise<{ sent: boolean; hasToken: boolean; messageId?: string; error?: string }> {
   const token = await resolveDeviceToken();
   const metadata: PushMetadata = { type, priority, symbol, actionUrl };
+  const channel = getNotificationChannel(type);
 
   if (!token) {
     await logNotification({
@@ -110,12 +111,17 @@ export async function sendPushNotification(
           .map(([key, value]) => [key, String(value)])
       ),
       android: {
-        priority: priority === "LOW" ? "normal" : "high",
+        priority: "high",
+        ttl: 60 * 1000,
         notification: {
-          channelId: type.includes("SELL") || type.includes("EXIT")
-            ? "sell_signals"
-            : "buy_signals",
-          sound: "default"
+          channelId: channel.channelId,
+          sound: channel.sound,
+          priority: "high"
+        }
+      },
+      apns: {
+        headers: {
+          "apns-priority": "10"
         }
       }
     });
@@ -172,6 +178,18 @@ async function logNotification(data: Record<string, unknown>): Promise<void> {
 
 function getTokenPrefix(token: string): string {
   return `${token.slice(0, 12)}...`;
+}
+
+function getNotificationChannel(type: string): { channelId: string; sound: string } {
+  if (type.includes("SELL") || type.includes("EXIT") || type.includes("STOP_LOSS")) {
+    return { channelId: "sell_signals", sound: "sell_signal" };
+  }
+
+  if (type.includes("MARKET")) {
+    return { channelId: "market_updates", sound: "market_update" };
+  }
+
+  return { channelId: "buy_signals", sound: "buy_signal" };
 }
 
 function getErrorCode(error: unknown): string | undefined {

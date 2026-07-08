@@ -16,10 +16,16 @@ export async function registerDeviceToken(token: string): Promise<void> {
   await getDb()
     .collection(collectionNames.settings)
     .doc(TOKEN_DOC_ID)
-    .set({ token, updatedAt: Timestamp.now() }, { merge: true });
+    .set(
+      {
+        token,
+        updatedAt: Timestamp.now()
+      },
+      { merge: true }
+    );
 }
 
-async function resolveDeviceToken(): Promise<string | null> {
+export async function resolveDeviceToken(): Promise<string | null> {
   const tokenDoc = await getDb()
     .collection(collectionNames.settings)
     .doc(TOKEN_DOC_ID)
@@ -40,7 +46,7 @@ export async function sendPushNotification(
   priority: "HIGH" | "MEDIUM" | "LOW",
   symbol?: string,
   actionUrl?: string
-): Promise<{ sent: boolean; messageId?: string; error?: string }> {
+): Promise<{ sent: boolean; hasToken: boolean; messageId?: string; error?: string }> {
   const token = await resolveDeviceToken();
   const metadata: PushMetadata = { type, priority, symbol, actionUrl };
   const notificationRef = getDb().collection(collectionNames.notifications).doc();
@@ -58,7 +64,7 @@ export async function sendPushNotification(
       createdAt: Timestamp.now(),
       updatedAt: Timestamp.now()
     });
-    return { sent: false, error: "No FCM device token registered." };
+    return { sent: false, hasToken: false, error: "No FCM device token registered." };
   }
 
   try {
@@ -96,7 +102,7 @@ export async function sendPushNotification(
       updatedAt: Timestamp.now()
     });
 
-    return { sent: true, messageId };
+    return { sent: true, hasToken: true, messageId };
   } catch (error) {
     const errorMessage = error instanceof Error ? error.message : String(error);
 
@@ -114,6 +120,6 @@ export async function sendPushNotification(
       updatedAt: Timestamp.now()
     });
 
-    return { sent: false, error: errorMessage };
+    return { sent: false, hasToken: true, error: errorMessage };
   }
 }

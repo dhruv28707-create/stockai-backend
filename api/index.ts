@@ -6,7 +6,7 @@ import type { DocumentData, Query } from "firebase-admin/firestore";
 import { env } from "../config/env";
 import { getDb } from "../firebase/admin";
 import { collectionNames, riskAllocation, type RiskLevel } from "../models";
-import { registerDeviceToken, sendPushNotification } from "../services/fcm";
+import { registerDeviceToken, resolveDeviceToken, sendPushNotification } from "../services/fcm";
 import { getMarketSummary } from "../services/marketData";
 import { sendError, sendSuccess } from "../utils/response";
 
@@ -101,7 +101,7 @@ app.get("/api/portfolio", async (_req: Request, res: Response) => {
 
 const registerDeviceHandler = async (req: Request, res: Response) => {
   try {
-    const token = typeof req.body?.token === "string" ? req.body.token.trim() : "";
+    const token = getDeviceTokenFromRequest(req);
     if (!token) {
       sendError(res, 400, "Token is required");
       return;
@@ -116,9 +116,16 @@ const registerDeviceHandler = async (req: Request, res: Response) => {
 
 app.post("/api/notifications/register", registerDeviceHandler);
 app.post("/api/register-device", registerDeviceHandler);
+app.post("/api/device/register", registerDeviceHandler);
+app.post("/api/fcm/register", registerDeviceHandler);
+app.post("/api/api/notifications/register", registerDeviceHandler);
+app.post("/api/api/register-device", registerDeviceHandler);
+app.post("/notifications/register", registerDeviceHandler);
+app.post("/register-device", registerDeviceHandler);
 
-app.post("/api/notifications/test", async (_req: Request, res: Response) => {
+const testNotificationHandler = async (_req: Request, res: Response) => {
   try {
+    const hasToken = Boolean(await resolveDeviceToken());
     const result = await sendPushNotification(
       "StockAI test notification",
       "Your Firebase notification setup is connected.",
@@ -126,11 +133,30 @@ app.post("/api/notifications/test", async (_req: Request, res: Response) => {
       "LOW"
     );
 
-    sendSuccess(res, result, result.sent ? 200 : 400);
+    sendSuccess(res, {
+      ...result,
+      hasToken,
+      message: result.sent
+        ? "Test notification sent."
+        : result.error ?? "Test notification was logged but not delivered."
+    });
   } catch {
     sendError(res, 500, "Failed to send test notification");
   }
-});
+};
+
+app.get("/api/notifications/test", testNotificationHandler);
+app.post("/api/notifications/test", testNotificationHandler);
+app.get("/api/notifications/test-send", testNotificationHandler);
+app.post("/api/notifications/test-send", testNotificationHandler);
+app.get("/api/test-notification", testNotificationHandler);
+app.post("/api/test-notification", testNotificationHandler);
+app.get("/api/send-test-notification", testNotificationHandler);
+app.post("/api/send-test-notification", testNotificationHandler);
+app.get("/api/api/notifications/test", testNotificationHandler);
+app.post("/api/api/notifications/test", testNotificationHandler);
+app.get("/notifications/test", testNotificationHandler);
+app.post("/notifications/test", testNotificationHandler);
 
 app.get("/api/notifications", async (req: Request, res: Response) => {
   try {
@@ -311,6 +337,26 @@ function normalizeRiskLevel(value: unknown): RiskLevel {
   }
 
   return "medium";
+}
+
+function getDeviceTokenFromRequest(req: Request): string {
+  const candidates = [
+    req.body?.token,
+    req.body?.fcmToken,
+    req.body?.deviceToken,
+    req.body?.registrationToken,
+    req.query.token,
+    req.query.fcmToken,
+    req.query.deviceToken
+  ];
+
+  for (const candidate of candidates) {
+    if (typeof candidate === "string" && candidate.trim()) {
+      return candidate.trim();
+    }
+  }
+
+  return "";
 }
 
 function isAuthorizedCronRequest(req: Request): boolean {

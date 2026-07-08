@@ -19,6 +19,8 @@ export async function registerDeviceToken(token: string): Promise<void> {
     .set(
       {
         token,
+        tokenPrefix: getTokenPrefix(token),
+        tokenLength: token.length,
         updatedAt: Timestamp.now()
       },
       { merge: true }
@@ -37,6 +39,39 @@ export async function resolveDeviceToken(): Promise<string | null> {
   }
 
   return env.FCM_ANDROID_DEVICE_TOKEN ?? null;
+}
+
+export async function getNotificationTokenStatus(): Promise<{
+  hasToken: boolean;
+  tokenPrefix: string | null;
+  tokenLength: number | null;
+  source: "firestore" | "env" | "none";
+}> {
+  const tokenDoc = await getDb()
+    .collection(collectionNames.settings)
+    .doc(TOKEN_DOC_ID)
+    .get();
+
+  const savedToken = tokenDoc.data()?.token;
+  if (typeof savedToken === "string" && savedToken.trim()) {
+    return {
+      hasToken: true,
+      tokenPrefix: getTokenPrefix(savedToken),
+      tokenLength: savedToken.length,
+      source: "firestore"
+    };
+  }
+
+  if (env.FCM_ANDROID_DEVICE_TOKEN) {
+    return {
+      hasToken: true,
+      tokenPrefix: getTokenPrefix(env.FCM_ANDROID_DEVICE_TOKEN),
+      tokenLength: env.FCM_ANDROID_DEVICE_TOKEN.length,
+      source: "env"
+    };
+  }
+
+  return { hasToken: false, tokenPrefix: null, tokenLength: null, source: "none" };
 }
 
 export async function sendPushNotification(
@@ -105,6 +140,7 @@ export async function sendPushNotification(
     return { sent: true, hasToken: true, messageId };
   } catch (error) {
     const errorMessage = error instanceof Error ? error.message : String(error);
+    const errorCode = getErrorCode(error);
 
     await notificationRef.set({
       id: notificationRef.id,
@@ -115,11 +151,33 @@ export async function sendPushNotification(
       status: "failed",
       deviceToken: token,
       errorMessage,
+      errorCode,
       metadata,
       createdAt: Timestamp.now(),
       updatedAt: Timestamp.now()
     });
 
-    return { sent: false, hasToken: true, error: errorMessage };
+    return {
+      sent: false,
+      hasToken: true,
+      error: errorCode ? `${errorCode}: ${errorMessage}` : errorMessage
+    };
   }
+}
+
+function getTokenPrefix(token: string): string {
+  return `${token.slice(0, 12)}...`;
+}
+
+function getErrorCode(error: unknown): string | undefined {
+  if (
+    typeof error === "object" &&
+    error !== null &&
+    "code" in error &&
+    typeof error.code === "string"
+  ) {
+    return error.code;
+  }
+
+  return undefined;
 }

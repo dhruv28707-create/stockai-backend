@@ -6,7 +6,11 @@ import type { DocumentData, Query } from "firebase-admin/firestore";
 import { env } from "../config/env";
 import { getDb } from "../firebase/admin";
 import { collectionNames, riskAllocation, type RiskLevel } from "../models";
-import { registerDeviceToken, resolveDeviceToken, sendPushNotification } from "../services/fcm";
+import {
+  getNotificationTokenStatus,
+  registerDeviceToken,
+  sendPushNotification
+} from "../services/fcm";
 import { getMarketSummary } from "../services/marketData";
 import { sendError, sendSuccess } from "../utils/response";
 
@@ -108,37 +112,86 @@ const registerDeviceHandler = async (req: Request, res: Response) => {
     }
 
     await registerDeviceToken(token);
-    sendSuccess(res, { registered: true });
+    sendSuccess(res, {
+      registered: true,
+      hasToken: true,
+      tokenPrefix: `${token.slice(0, 12)}...`,
+      tokenLength: token.length
+    });
   } catch {
     sendError(res, 500, "Failed to register device");
   }
 };
 
+app.get("/api/notifications/register", registerDeviceHandler);
 app.post("/api/notifications/register", registerDeviceHandler);
+app.get("/api/register-device", registerDeviceHandler);
 app.post("/api/register-device", registerDeviceHandler);
 app.post("/api/device/register", registerDeviceHandler);
 app.post("/api/fcm/register", registerDeviceHandler);
+app.get("/api/device/register", registerDeviceHandler);
+app.get("/api/fcm/register", registerDeviceHandler);
 app.post("/api/api/notifications/register", registerDeviceHandler);
 app.post("/api/api/register-device", registerDeviceHandler);
 app.post("/notifications/register", registerDeviceHandler);
 app.post("/register-device", registerDeviceHandler);
+app.get("/api/api/notifications/register", registerDeviceHandler);
+app.get("/api/api/register-device", registerDeviceHandler);
+app.get("/notifications/register", registerDeviceHandler);
+app.get("/register-device", registerDeviceHandler);
 
-const testNotificationHandler = async (_req: Request, res: Response) => {
+const notificationStatusHandler = async (_req: Request, res: Response) => {
   try {
-    const hasToken = Boolean(await resolveDeviceToken());
+    const tokenStatus = await getNotificationTokenStatus();
+    const lastNotificationSnap = await getDb()
+      .collection(collectionNames.notifications)
+      .where("userId", "==", env.SINGLE_USER_ID)
+      .orderBy("createdAt", "desc")
+      .limit(1)
+      .get();
+
+    sendSuccess(res, {
+      ...tokenStatus,
+      lastNotification: lastNotificationSnap.docs[0]
+        ? normalizeDoc(
+            lastNotificationSnap.docs[0].id,
+            lastNotificationSnap.docs[0].data()
+          )
+        : null
+    });
+  } catch {
+    sendError(res, 500, "Failed to fetch notification status");
+  }
+};
+
+app.get("/api/notifications/status", notificationStatusHandler);
+app.get("/api/notifications/debug", notificationStatusHandler);
+app.get("/api/api/notifications/status", notificationStatusHandler);
+app.get("/notifications/status", notificationStatusHandler);
+
+const testNotificationHandler = async (req: Request, res: Response) => {
+  try {
+    const requestToken = getDeviceTokenFromRequest(req);
+    if (requestToken) {
+      await registerDeviceToken(requestToken);
+    }
+
+    const tokenStatusBeforeSend = await getNotificationTokenStatus();
     const result = await sendPushNotification(
-      "StockAI test notification",
-      "Your Firebase notification setup is connected.",
+      getStringFromRequest(req, "title") ?? "StockAI test notification",
+      getStringFromRequest(req, "body") ?? "Your Firebase notification setup is connected.",
       "MARKET_SUMMARY",
       "LOW"
     );
+    const tokenStatusAfterSend = await getNotificationTokenStatus();
 
     sendSuccess(res, {
       ...result,
-      hasToken,
+      tokenStatus: tokenStatusAfterSend,
+      registeredTokenFromRequest: Boolean(requestToken),
       message: result.sent
         ? "Test notification sent."
-        : result.error ?? "Test notification was logged but not delivered."
+        : getNotificationFailureMessage(result.error, tokenStatusBeforeSend.hasToken)
     });
   } catch {
     sendError(res, 500, "Failed to send test notification");
@@ -357,6 +410,29 @@ function getDeviceTokenFromRequest(req: Request): string {
   }
 
   return "";
+}
+
+function getStringFromRequest(req: Request, field: string): string | null {
+  const bodyValue = req.body?.[field];
+  const queryValue = req.query[field];
+
+  if (typeof bodyValue === "string" && bodyValue.trim()) {
+    return bodyValue.trim();
+  }
+
+  if (typeof queryValue === "string" && queryValue.trim()) {
+    return queryValue.trim();
+  }
+
+  return null;
+}
+
+function getNotificationFailureMessage(error: string | undefined, hadToken: boolean): string {
+  if (!hadToken) {
+    return "No FCM token is saved. The frontend must register the Android FCM token first.";
+  }
+
+  return error ?? "FCM rejected the test notification.";
 }
 
 function isAuthorizedCronRequest(req: Request): boolean {

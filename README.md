@@ -1,30 +1,28 @@
 # Android AI Stock Assistant Backend
 
-Production-ready scaffold for a single-user Android AI Stock Assistant backend.
+Single-user backend for a personal Indian stock-market AI assistant.
+
+## What It Does
+
+- Stores monthly capital in Firebase Firestore.
+- Stores the Android FCM device token in Firebase Firestore.
+- Sends push notifications through Firebase Admin SDK.
+- Exposes portfolio, recommendation, notification, capital, and market summary APIs.
+- Defines weekday cron endpoints for:
+  - 12:00 PM IST buy scan: `/api/cron/scan`
+  - 2:00 PM IST portfolio/sell scan: `/api/cron/check-positions`
 
 ## Stack
 
 - Node.js
 - TypeScript
-- Firebase Firestore
+- Express
+- Firebase Admin SDK
+- Firestore
 - Firebase Cloud Messaging
 - Vercel serverless deployment
-- Modular project structure
 
-## Project Structure
-
-```text
-api/        Vercel API route handlers
-config/     Environment loading and typed app configuration
-cron/       Scheduled job entry points
-firebase/   Firebase Admin SDK initialization
-models/     Firestore/domain model types
-services/   Injectable service modules
-types/      Shared TypeScript types
-utils/      Logging, responses, and common helpers
-```
-
-## Getting Started
+## Setup
 
 1. Install dependencies:
 
@@ -32,75 +30,48 @@ utils/      Logging, responses, and common helpers
    npm install
    ```
 
-2. Create a local environment file:
+2. Create `.env` from `.env.example`.
 
-   ```bash
-   cp .env.example .env
+3. Add Firebase service-account values:
+
+   ```text
+   FIREBASE_PROJECT_ID
+   FIREBASE_CLIENT_EMAIL
+   FIREBASE_PRIVATE_KEY
+   FIRESTORE_DATABASE_ID=default
    ```
 
-3. Fill in Firebase service account values and app settings.
-
-4. Run locally with Vercel:
+4. Run locally:
 
    ```bash
    npm run dev
    ```
 
-5. Type-check the project:
-
-   ```bash
-   npm run typecheck
-   ```
-
-## Environment Variables
-
-| Variable                   | Required | Description                                                        |
-| -------------------------- | -------- | ------------------------------------------------------------------ |
-| `NODE_ENV`                 | No       | Node runtime environment. Defaults to `development`.               |
-| `APP_ENV`                  | No       | App environment label such as `local`, `preview`, or `production`. |
-| `SINGLE_USER_ID`           | Yes      | Stable identifier for the single Android user.                     |
-| `FIREBASE_PROJECT_ID`      | Yes      | Firebase project ID.                                               |
-| `FIREBASE_CLIENT_EMAIL`    | Yes      | Firebase service account client email.                             |
-| `FIREBASE_PRIVATE_KEY`     | Yes      | Firebase service account private key. Preserve newline escapes.    |
-| `FCM_ANDROID_DEVICE_TOKEN` | No       | Android device token for FCM notifications.                        |
-| `CRON_SECRET`              | Yes      | Shared secret used to protect cron API routes.                     |
-
-## Vercel Deployment
-
-Add the environment variables above in the Vercel project dashboard before deploying.
-
-The scaffold includes a weekday cron placeholder at:
+The local API listens at:
 
 ```text
-/api/cron/daily
+http://localhost:3000/api
 ```
 
-No business logic is implemented yet. Route handlers and services only establish structure, validation, and integration boundaries.
+## Main API Endpoints
 
-## Firestore Collections
+- `GET /api/health`
+- `GET /api/market/summary`
+- `GET /api/portfolio`
+- `GET /api/recommendations?status=pending&action=buy`
+- `GET /api/notifications`
+- `POST /api/notifications/register` with `{ "token": "FCM_TOKEN" }`
+- `POST /api/register-device` with `{ "token": "FCM_TOKEN" }`
+- `POST /api/notifications/test`
+- `GET /api/capital/current`
+- `POST /api/capital/budget` with `{ "capital": 50000, "riskLevel": "medium", "tradingStyle": "swing" }`
+- `POST /api/capital/profit` with `{ "amount": 2500 }`
 
-The Firestore service layer includes typed CRUD helpers for:
+## Vercel Cron
 
-```text
-settings
-portfolio
-positions
-recommendations
-trades
-missedTrades
-dailyReports
-weeklyReports
-archives
-notifications
-```
+`vercel.json` schedules weekday jobs in UTC:
 
-Use `FirestoreService` to access collection helpers:
+- `30 6 * * 1-5` = 12:00 PM IST
+- `30 8 * * 1-5` = 2:00 PM IST
 
-```ts
-import { FirestoreService } from "./services";
-
-const firestore = new FirestoreService();
-const settings = await firestore.settings.list({ userId: "single-user-id" });
-```
-
-Each helper validates create and update payloads with Zod before writing to Firestore.
+Set `CRON_SECRET` in Vercel if you want cron endpoints protected.

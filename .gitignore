@@ -15,3 +15,5 @@ pnpm-debug.log*
 google-services.json
 firebase-adminsdk*.json
 serviceAccountKey.json
+.vercel
+.env*.local

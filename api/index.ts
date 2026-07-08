@@ -1,66 +1,342 @@
 import cors from "cors";
 import express from "express";
 import type { Request, Response } from "express";
-
-import portfolioHandler from "../src/routes/portfolio/index.js";
-import recommendationsHandler from "../src/routes/recommendations/index.js";
-import recommendationPurchasedHandler from "../src/routes/recommendation/purchased.js";
-import recommendationSkippedHandler from "../src/routes/recommendation/skipped.js";
-import openPositionsHandler from "../src/routes/positions/index.js";
-import positionExitHandler from "../src/routes/position/exit.js";
-import positionHoldHandler from "../src/routes/position/hold.js";
-// KEY CHANGE: daily/weekly report generation removed — the report cron
-// slot is now used for a second daily market scan instead (see
-// cron/dailyStockCheck.ts removal and vercel.json). ReportService and
-// its models are left in place in case they're needed again later, but
-// no route or cron calls them anymore.
-import missedTradesHandler from "../src/routes/missed-trades/index.js";
-import scanMarketHandler from "../src/routes/scan/index.js";
-import cronScanHandler from "../src/routes/cron/scan.js";
-import cronCheckPositionsHandler from "../src/routes/cron/check-position.js";
-import registerDeviceHandler from "../src/routes/notifications/register.js";
-import notificationsListHandler from "../src/routes/notifications/list.js";
-import marketSummaryHandler from "../src/routes/market/summary.js";
-import monthlySetupHandler from "../src/routes/monthly/setup.js";
-import healthHandler from "../src/routes/health.js";
+import { FieldValue, Timestamp } from "firebase-admin/firestore";
+import type { DocumentData, Query } from "firebase-admin/firestore";
+import { env } from "../config/env";
+import { getDb } from "../firebase/admin";
+import { collectionNames, riskAllocation, type RiskLevel } from "../models";
+import { registerDeviceToken, sendPushNotification } from "../services/fcm";
+import { getMarketSummary } from "../services/marketData";
+import { sendError, sendSuccess } from "../utils/response";
 
 const app = express();
 
-// ── CORS — must be before all routes ────────────────────────
 app.use(
   cors({
     origin: "*",
     methods: ["GET", "POST", "PUT", "PATCH", "DELETE", "OPTIONS"],
-    allowedHeaders: ["Content-Type", "Accept", "Authorization"]
+    allowedHeaders: ["Content-Type", "Accept", "Authorization", "x-cron-secret"]
   })
 );
-
 app.use(express.json());
 
-const wrap =
-  (handler: (req: Request, res: Response) => unknown) => (req: Request, res: Response) =>
-    handler(req, res);
-
-// ── Routes ───────────────────────────────────────────────────
-app.all("/api/portfolio", wrap(portfolioHandler));
-app.all("/api/recommendations", wrap(recommendationsHandler));
-app.all("/api/recommendation/purchased", wrap(recommendationPurchasedHandler));
-app.all("/api/recommendation/skipped", wrap(recommendationSkippedHandler));
-app.all("/api/open-positions", wrap(openPositionsHandler));
-app.all("/api/position/exit", wrap(positionExitHandler));
-app.all("/api/position/hold", wrap(positionHoldHandler));
-app.all("/api/missed-trades", wrap(missedTradesHandler));
-app.all("/api/scan-market", wrap(scanMarketHandler));
-app.all("/api/cron/scan", wrap(cronScanHandler));
-app.all("/api/cron/check-positions", wrap(cronCheckPositionsHandler));
-app.all("/api/register-device", wrap(registerDeviceHandler));
-app.all("/api/notifications", wrap(notificationsListHandler));
-app.all("/api/market/summary", wrap(marketSummaryHandler));
-app.all("/api/month/start", wrap(monthlySetupHandler));
-app.all("/api/health", wrap(healthHandler));
-
-app.get("/api", (_req, res) => {
-  res.json({ data: { service: "android-ai-stock-assistant-backend", status: "ready" } });
+app.get("/api", (_req: Request, res: Response) => {
+  sendSuccess(res, { service: "StockAI Backend", storage: "firebase", version: "1.0.0" });
 });
+
+app.get("/api/health", (_req: Request, res: Response) => {
+  sendSuccess(res, { status: "ready" });
+});
+
+app.get("/api/market/summary", async (_req: Request, res: Response) => {
+  try {
+    sendSuccess(res, await getMarketSummary());
+  } catch {
+    sendError(res, 500, "Failed to fetch market data");
+  }
+});
+
+app.get("/api/recommendations", async (req: Request, res: Response) => {
+  try {
+    const status = typeof req.query.status === "string" ? req.query.status : "pending";
+    const action = typeof req.query.action === "string" ? req.query.action : undefined;
+    const limit = Math.min(toPositiveNumber(req.query.limit, 50), 100);
+    const setup = await getCurrentMonthlySetup();
+    const remainingCapital = Number(setup?.remainingCapital);
+    const maxEntry = Number.isFinite(remainingCapital) ? remainingCapital : Infinity;
+
+    let query: Query = getDb()
+      .collection(collectionNames.recommendations)
+      .where("userId", "==", env.SINGLE_USER_ID);
+
+    if (status) query = query.where("status", "==", status);
+    if (action) query = query.where("action", "==", action);
+
+    const snap = await query.orderBy("createdAt", "desc").limit(limit).get();
+    const items = snap.docs
+      .map((doc) => normalizeDoc(doc.id, doc.data()))
+      .filter((item) => {
+        const entryPrice = Number(item.entryPrice ?? item.entry ?? item.currentPrice ?? 0);
+        return !entryPrice || entryPrice <= maxEntry;
+      });
+
+    sendSuccess(res, { items, count: items.length });
+  } catch {
+    sendError(res, 500, "Failed to fetch recommendations");
+  }
+});
+
+app.get("/api/portfolio", async (_req: Request, res: Response) => {
+  try {
+    const month = getCurrentMonth();
+    const [monthlySetup, positionsSnap, portfolioSnap] = await Promise.all([
+      getMonthlySetup(month),
+      getDb()
+        .collection(collectionNames.positions)
+        .where("userId", "==", env.SINGLE_USER_ID)
+        .where("status", "==", "open")
+        .get(),
+      getDb()
+        .collection(collectionNames.portfolio)
+        .where("userId", "==", env.SINGLE_USER_ID)
+        .limit(1)
+        .get()
+    ]);
+
+    const openPositions = positionsSnap.docs.map((doc) => normalizeDoc(doc.id, doc.data()));
+    const portfolioDoc = portfolioSnap.docs[0];
+
+    sendSuccess(res, {
+      month,
+      monthlySetup,
+      portfolio: portfolioDoc ? normalizeDoc(portfolioDoc.id, portfolioDoc.data()) : null,
+      openPositionCount: openPositions.length,
+      openPositions
+    });
+  } catch {
+    sendError(res, 500, "Failed to fetch portfolio");
+  }
+});
+
+const registerDeviceHandler = async (req: Request, res: Response) => {
+  try {
+    const token = typeof req.body?.token === "string" ? req.body.token.trim() : "";
+    if (!token) {
+      sendError(res, 400, "Token is required");
+      return;
+    }
+
+    await registerDeviceToken(token);
+    sendSuccess(res, { registered: true });
+  } catch {
+    sendError(res, 500, "Failed to register device");
+  }
+};
+
+app.post("/api/notifications/register", registerDeviceHandler);
+app.post("/api/register-device", registerDeviceHandler);
+
+app.post("/api/notifications/test", async (_req: Request, res: Response) => {
+  try {
+    const result = await sendPushNotification(
+      "StockAI test notification",
+      "Your Firebase notification setup is connected.",
+      "MARKET_SUMMARY",
+      "LOW"
+    );
+
+    sendSuccess(res, result, result.sent ? 200 : 400);
+  } catch {
+    sendError(res, 500, "Failed to send test notification");
+  }
+});
+
+app.get("/api/notifications", async (req: Request, res: Response) => {
+  try {
+    const limit = Math.min(toPositiveNumber(req.query.limit, 50), 100);
+    const status = typeof req.query.status === "string" ? req.query.status : undefined;
+
+    let query: Query = getDb()
+      .collection(collectionNames.notifications)
+      .where("userId", "==", env.SINGLE_USER_ID);
+
+    if (status) query = query.where("status", "==", status);
+
+    const snap = await query.orderBy("createdAt", "desc").limit(limit).get();
+    const items = snap.docs.map((doc) => normalizeDoc(doc.id, doc.data()));
+
+    sendSuccess(res, { items, count: items.length });
+  } catch {
+    sendError(res, 500, "Failed to fetch notifications");
+  }
+});
+
+app.get("/api/capital/current", async (_req: Request, res: Response) => {
+  try {
+    sendSuccess(res, await getCurrentMonthlySetup());
+  } catch {
+    sendError(res, 500, "Failed to fetch monthly capital");
+  }
+});
+
+const saveCapitalSetupHandler = async (req: Request, res: Response) => {
+  try {
+    const capital = toPositiveNumber(
+      req.body?.capital ?? req.body?.amount ?? req.body?.budget ?? req.body?.monthlyCapital,
+      0
+    );
+    if (!capital) {
+      sendError(res, 400, "Valid capital amount is required");
+      return;
+    }
+
+    const month = typeof req.body?.month === "string" ? req.body.month : getCurrentMonth();
+    const riskLevel = normalizeRiskLevel(req.body?.riskLevel ?? req.body?.risk);
+    const tradingStyle =
+      typeof (req.body?.tradingStyle ?? req.body?.style) === "string" &&
+      (req.body.tradingStyle ?? req.body.style).trim()
+        ? (req.body.tradingStyle ?? req.body.style).trim().toLowerCase()
+        : "swing";
+    const docId = `${env.SINGLE_USER_ID}_${month}`;
+    const now = Timestamp.now();
+    const setup = {
+      id: docId,
+      userId: env.SINGLE_USER_ID,
+      month,
+      capital,
+      budget: capital,
+      riskLevel,
+      tradingStyle,
+      maxTradeCapital: Math.floor(capital * riskAllocation[riskLevel]),
+      remainingCapital: capital,
+      profitTaken: 0,
+      archived: false,
+      updatedAt: now
+    };
+
+    await getDb()
+      .collection(collectionNames.monthlySetup)
+      .doc(docId)
+      .set({ ...setup, createdAt: now }, { merge: true });
+
+    sendSuccess(res, setup);
+  } catch {
+    sendError(res, 500, "Failed to set monthly capital");
+  }
+};
+
+app.post("/api/capital/budget", saveCapitalSetupHandler);
+app.post("/api/month/start", saveCapitalSetupHandler);
+app.post("/api/monthly/setup", saveCapitalSetupHandler);
+app.post("/api/month/setup", saveCapitalSetupHandler);
+app.post("/api/api/capital/budget", saveCapitalSetupHandler);
+app.post("/api/api/month/start", saveCapitalSetupHandler);
+app.post("/capital/budget", saveCapitalSetupHandler);
+app.post("/month/start", saveCapitalSetupHandler);
+
+app.post("/api/capital/profit", async (req: Request, res: Response) => {
+  try {
+    const amount = toPositiveNumber(req.body?.amount, 0);
+    if (!amount) {
+      sendError(res, 400, "Valid profit amount is required");
+      return;
+    }
+
+    const month = typeof req.body?.month === "string" ? req.body.month : getCurrentMonth();
+    await getDb()
+      .collection(collectionNames.monthlySetup)
+      .doc(`${env.SINGLE_USER_ID}_${month}`)
+      .set(
+        {
+          userId: env.SINGLE_USER_ID,
+          month,
+          profitTaken: FieldValue.increment(amount),
+          updatedAt: Timestamp.now()
+        },
+        { merge: true }
+      );
+
+    sendSuccess(res, { logged: true });
+  } catch {
+    sendError(res, 500, "Failed to log profit");
+  }
+});
+
+app.get("/api/cron/scan", async (req: Request, res: Response) => {
+  if (!isAuthorizedCronRequest(req)) {
+    sendError(res, 401, "Unauthorized cron request");
+    return;
+  }
+
+  await logCronRun("buy_scan");
+  sendSuccess(res, { status: "accepted", job: "buy_scan" });
+});
+
+app.get("/api/cron/check-positions", async (req: Request, res: Response) => {
+  if (!isAuthorizedCronRequest(req)) {
+    sendError(res, 401, "Unauthorized cron request");
+    return;
+  }
+
+  await logCronRun("sell_scan");
+  sendSuccess(res, { status: "accepted", job: "sell_scan" });
+});
+
+function getCurrentMonth(): string {
+  const now = new Date();
+  return `${now.getFullYear()}-${String(now.getMonth() + 1).padStart(2, "0")}`;
+}
+
+async function getCurrentMonthlySetup(): Promise<Record<string, unknown> | null> {
+  return getMonthlySetup(getCurrentMonth());
+}
+
+async function getMonthlySetup(month: string): Promise<Record<string, unknown> | null> {
+  const snap = await getDb()
+    .collection(collectionNames.monthlySetup)
+    .doc(`${env.SINGLE_USER_ID}_${month}`)
+    .get();
+
+  return snap.exists ? normalizeDoc(snap.id, snap.data() ?? {}) : null;
+}
+
+function normalizeDoc(id: string, data: DocumentData): Record<string, unknown> {
+  return Object.fromEntries(
+    Object.entries({ id, ...data }).map(([key, value]) => [
+      key,
+      isFirestoreTimestamp(value) ? value.toDate().toISOString() : value
+    ])
+  );
+}
+
+function isFirestoreTimestamp(value: unknown): value is Timestamp {
+  return (
+    typeof value === "object" &&
+    value !== null &&
+    "toDate" in value &&
+    typeof value.toDate === "function"
+  );
+}
+
+function toPositiveNumber(value: unknown, fallback: number): number {
+  const parsed = Number(value);
+  return Number.isFinite(parsed) && parsed > 0 ? parsed : fallback;
+}
+
+function normalizeRiskLevel(value: unknown): RiskLevel {
+  const normalized = typeof value === "string" ? value.toLowerCase() : "";
+  if (normalized === "low" || normalized === "medium" || normalized === "high") {
+    return normalized;
+  }
+
+  return "medium";
+}
+
+function isAuthorizedCronRequest(req: Request): boolean {
+  if (!env.CRON_SECRET) return true;
+  return (
+    req.header("authorization") === `Bearer ${env.CRON_SECRET}` ||
+    req.header("x-cron-secret") === env.CRON_SECRET
+  );
+}
+
+async function logCronRun(job: "buy_scan" | "sell_scan"): Promise<void> {
+  const ref = getDb().collection("cronRuns").doc();
+  await ref.set({
+    id: ref.id,
+    userId: env.SINGLE_USER_ID,
+    job,
+    status: "accepted",
+    createdAt: Timestamp.now(),
+    updatedAt: Timestamp.now()
+  });
+}
+
+if (!process.env.VERCEL) {
+  app.listen(env.PORT, () => {
+    console.log(`StockAI backend listening on http://localhost:${env.PORT}`);
+  });
+}
 
 export default app;

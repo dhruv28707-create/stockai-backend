@@ -112,11 +112,14 @@ export async function sendPushNotification(
       ),
       android: {
         priority: "high",
-        ttl: 60 * 1000,
+        ttl: 24 * 60 * 60 * 1000,
+        directBootOk: true,
         notification: {
           channelId: channel.channelId,
           sound: channel.sound,
-          priority: "high"
+          priority: "max",
+          visibility: "public",
+          defaultVibrateTimings: true
         }
       },
       apns: {

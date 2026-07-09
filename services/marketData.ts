@@ -83,6 +83,10 @@ interface MoverData {
 
 interface MarketSummary {
   status: string;
+  marketStatus: string;
+  marketState: string;
+  isMarketOpen: boolean;
+  isOpen: boolean;
   indices: IndexData[];
   topGainers: MoverData[];
   topLosers: MoverData[];
@@ -92,12 +96,34 @@ interface MarketSummary {
   updatedAt: string;
 }
 
-function getMarketStatus(): string {
+function getFallbackMarketStatus(): "OPEN" | "PRE_OPEN" | "CLOSED" {
   const now = new Date();
+  const istDate = new Date(now.getTime() + 330 * 60 * 1000);
+  const day = istDate.getUTCDay();
+  if (day === 0 || day === 6) return "CLOSED";
+
   const istMin = (now.getUTCHours() * 60 + now.getUTCMinutes() + 330) % 1440;
   if (istMin >= 555 && istMin < 930) return "OPEN";
   if (istMin >= 540 && istMin < 555) return "PRE_OPEN";
   return "CLOSED";
+}
+
+function getMarketStatus(indexQuote?: Record<string, unknown>): "OPEN" | "PRE_OPEN" | "CLOSED" {
+  const exchangeState = String(
+    indexQuote?.marketState ?? indexQuote?.fullExchangeName ?? ""
+  ).toUpperCase();
+
+  if (exchangeState === "REGULAR" || exchangeState === "OPEN") return "OPEN";
+  if (exchangeState === "PRE" || exchangeState === "PREPRE") return "PRE_OPEN";
+  if (
+    exchangeState === "CLOSED" ||
+    exchangeState === "POST" ||
+    exchangeState === "POSTPOST"
+  ) {
+    return "CLOSED";
+  }
+
+  return getFallbackMarketStatus();
 }
 
 export async function getMarketSummary(): Promise<MarketSummary> {
@@ -159,13 +185,18 @@ export async function getMarketSummary(): Promise<MarketSummary> {
   const totalVolume = movers.reduce((sum, m) => sum + m.volume, 0);
   const advancers = movers.filter((m) => m.changePercent > 0).length;
   const decliners = movers.filter((m) => m.changePercent < 0).length;
+  const status = getMarketStatus(quotes["^NSEI"]);
 
   const result: MarketSummary = {
-    status: getMarketStatus(),
+    status,
+    marketStatus: status,
+    marketState: status,
+    isMarketOpen: status === "OPEN",
+    isOpen: status === "OPEN",
     indices,
     topGainers,
     topLosers,
-    aiAnalysis: `Market ${getMarketStatus() === "OPEN" ? "is trading" : "is closed"}. NIFTY 50 at ${indices[0]?.value ?? "N/A"}. ${advancers} advances, ${decliners} declines.`,
+    aiAnalysis: `Market ${status === "OPEN" ? "is trading" : status === "PRE_OPEN" ? "is in pre-open" : "is closed"}. NIFTY 50 at ${indices[0]?.value ?? "N/A"}. ${advancers} advances, ${decliners} declines.`,
     advanceDeclineRatio:
       decliners > 0
         ? Math.round((advancers / decliners) * 100) / 100

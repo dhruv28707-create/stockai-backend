@@ -243,7 +243,35 @@ app.get("/api/notifications", async (req: Request, res: Response) => {
 
 app.get("/api/capital/current", async (_req: Request, res: Response) => {
   try {
-    sendSuccess(res, await getCurrentMonthlySetup());
+    sendSuccess(res, toCapitalSetupResponse(await getCurrentMonthlySetup()));
+  } catch {
+    sendError(res, 500, "Failed to fetch monthly capital");
+  }
+});
+app.get("/api/capital", async (_req: Request, res: Response) => {
+  try {
+    sendSuccess(res, toCapitalSetupResponse(await getCurrentMonthlySetup()));
+  } catch {
+    sendError(res, 500, "Failed to fetch monthly capital");
+  }
+});
+app.get("/capital/current", async (_req: Request, res: Response) => {
+  try {
+    sendSuccess(res, toCapitalSetupResponse(await getCurrentMonthlySetup()));
+  } catch {
+    sendError(res, 500, "Failed to fetch monthly capital");
+  }
+});
+app.get("/api/month/current", async (_req: Request, res: Response) => {
+  try {
+    sendSuccess(res, toCapitalSetupResponse(await getCurrentMonthlySetup()));
+  } catch {
+    sendError(res, 500, "Failed to fetch monthly capital");
+  }
+});
+app.get("/api/monthly/setup", async (_req: Request, res: Response) => {
+  try {
+    sendSuccess(res, toCapitalSetupResponse(await getCurrentMonthlySetup()));
   } catch {
     sendError(res, 500, "Failed to fetch monthly capital");
   }
@@ -289,7 +317,7 @@ const saveCapitalSetupHandler = async (req: Request, res: Response) => {
       .doc(docId)
       .set({ ...setup, createdAt: now }, { merge: true });
 
-    sendSuccess(res, setup);
+    sendSuccess(res, toCapitalSetupResponse(normalizeDoc(docId, setup)));
   } catch {
     sendError(res, 500, "Failed to set monthly capital");
   }
@@ -353,8 +381,14 @@ app.get("/api/cron/check-positions", async (req: Request, res: Response) => {
 });
 
 function getCurrentMonth(): string {
-  const now = new Date();
-  return `${now.getFullYear()}-${String(now.getMonth() + 1).padStart(2, "0")}`;
+  const parts = new Intl.DateTimeFormat("en-CA", {
+    timeZone: "Asia/Kolkata",
+    year: "numeric",
+    month: "2-digit"
+  }).formatToParts(new Date());
+  const year = parts.find((part) => part.type === "year")?.value;
+  const month = parts.find((part) => part.type === "month")?.value;
+  return `${year}-${month}`;
 }
 
 async function getCurrentMonthlySetup(): Promise<Record<string, unknown> | null> {
@@ -368,6 +402,28 @@ async function getMonthlySetup(month: string): Promise<Record<string, unknown> |
     .get();
 
   return snap.exists ? normalizeDoc(snap.id, snap.data() ?? {}) : null;
+}
+
+function toCapitalSetupResponse(
+  setup: Record<string, unknown> | null
+): Record<string, unknown> {
+  if (!setup) {
+    return {
+      hasSetup: false,
+      needsSetup: true,
+      isCapitalSet: false,
+      month: getCurrentMonth(),
+      setup: null
+    };
+  }
+
+  return {
+    ...setup,
+    hasSetup: true,
+    needsSetup: false,
+    isCapitalSet: true,
+    setup
+  };
 }
 
 function normalizeDoc(id: string, data: DocumentData): Record<string, unknown> {

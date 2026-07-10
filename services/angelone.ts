@@ -66,10 +66,12 @@ function buildHeaders(apiKey: string, authToken?: string): Record<string, string
   return {
     "X-PrivateKey": apiKey,
     "X-SourceID": "WEB",
-    "X-ClientLocalIP": "127.0.0.1",
-    "X-ClientPublicIP": "127.0.0.1",
-    "X-MACAddress": "00:00:00:00:00:00",
+    "X-ClientLocalIP": "192.168.1.100",
+    "X-ClientPublicIP": "103.95.97.4",
+    "X-MACAddress": "00:1A:2B:3C:4D:5E",
+    "Accept": "application/json",
     "Content-Type": "application/json",
+    "User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36",
     ...(authToken ? { Authorization: `Bearer ${authToken}` } : {})
   };
 }

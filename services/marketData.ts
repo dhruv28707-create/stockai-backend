@@ -1,5 +1,7 @@
-import yahooFinance from "yahoo-finance2";
+import YahooFinance from "yahoo-finance2";
 import { getYahooTickers } from "../config/stocks";
+
+const yahooFinance = new YahooFinance();
 
 interface CacheEntry<T> {
   data: T;

@@ -96,22 +96,31 @@ function getMarketStatus(indexQuote?: Record<string, unknown>): "OPEN" | "PRE_OP
   return getFallbackMarketStatus();
 }
 
+const YAHOO_BATCH = 30;
+
+async function fetchYahooQuotes(tickers: string[]): Promise<Record<string, Record<string, unknown>>> {
+  const quotes: Record<string, Record<string, unknown>> = {};
+  for (let i = 0; i < tickers.length; i += YAHOO_BATCH) {
+    const batch = tickers.slice(i, i + YAHOO_BATCH);
+    const results = await Promise.allSettled(
+      batch.map((t) => yahooFinance.quote(t, {}, { validateResult: false }))
+    );
+    batch.forEach((ticker, j) => {
+      const r = results[j];
+      if (r.status === "fulfilled" && r.value) {
+        quotes[ticker] = r.value as Record<string, unknown>;
+      }
+    });
+  }
+  return quotes;
+}
+
 export async function getMarketSummary(): Promise<MarketSummary> {
   const cached = getCached<MarketSummary>("market_summary");
   if (cached) return cached;
 
   const allTickers = [...NSE_INDICES.map((i) => i.ticker), ...NSE_STOCKS];
-  const quoteResults = await Promise.allSettled(
-    allTickers.map((t) => yahooFinance.quote(t, {}, { validateResult: false }))
-  );
-
-  const quotes: Record<string, Record<string, unknown>> = {};
-  allTickers.forEach((ticker, i) => {
-    const r = quoteResults[i];
-    if (r.status === "fulfilled" && r.value) {
-      quotes[ticker] = r.value as Record<string, unknown>;
-    }
-  });
+  const quotes = await fetchYahooQuotes(allTickers);
 
   const indices: IndexData[] = NSE_INDICES.filter((i) => quotes[i.ticker]).map((i) => {
     const q = quotes[i.ticker];

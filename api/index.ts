@@ -38,8 +38,8 @@ app.get("/api/health", (_req: Request, res: Response) => {
 app.get("/api/market/summary", async (_req: Request, res: Response) => {
   try {
     sendSuccess(res, await getMarketSummary());
-  } catch {
-    sendError(res, 500, "Failed to fetch market data");
+  } catch (error) {
+    sendError(res, 500, `Failed to fetch market data: ${getErrorMessage(error)}`);
   }
 });
 
@@ -54,8 +54,8 @@ app.get("/api/market/angelone/summary", async (req: Request, res: Response) => {
     }
     const batch = toPositiveNumber(req.query.batch, 0);
     sendSuccess(res, await getAngelOneMarketSummary(batch || undefined));
-  } catch {
-    sendError(res, 500, "Failed to fetch Angel One market data");
+  } catch (error) {
+    sendError(res, 500, `Angel One market data error: ${getErrorMessage(error)}`);
   }
 });
 

@@ -104,14 +104,21 @@ export async function login(): Promise<AngelOneTokens> {
     })
   });
 
+  const loginText = await response.text();
+
   if (!response.ok) {
-    throw new Error(`Angel One login failed (${response.status}): ${response.statusText}`);
+    throw new Error(`Angel One login failed (${response.status}): ${loginText.slice(0, 300)}`);
   }
 
-  const json = (await response.json()) as LoginResponse;
+  let json: LoginResponse;
+  try {
+    json = JSON.parse(loginText);
+  } catch {
+    throw new Error(`Angel One login response not JSON: ${loginText.slice(0, 300)}`);
+  }
 
   if (json.status !== true && json.errorCode) {
-    throw new Error(`Angel One login error: ${json.message ?? json.error ?? "unknown"}`);
+    throw new Error(`Angel One login error: ${json.message ?? json.error ?? JSON.stringify(json).slice(0, 300)}`);
   }
 
   const tokens: AngelOneTokens = {
@@ -153,6 +160,8 @@ interface AngelOneQuoteData {
 
 interface AngelOneQuoteResponse {
   status: boolean;
+  message?: string;
+  error?: string;
   data: Record<string, AngelOneQuoteData>;
 }
 
@@ -169,20 +178,22 @@ export async function getQuotes(batchNumber?: number): Promise<Record<string, An
     headers: buildHeaders(env.ANGEL_ONE_API_KEY!, tokens.authToken),
     body: JSON.stringify({
       mode: "FULL",
-      exchangeTokens: {
-        NSE: symbols.map((s) => s.toUpperCase())
-      }
+      tradingSymbols: symbols.map((s) => `NSE:${s.toUpperCase()}`)
     })
   });
 
-  if (!response.ok) {
-    throw new Error(`Angel One quote fetch failed (${response.status})`);
+  const text = await response.text();
+  let json: AngelOneQuoteResponse;
+  try {
+    json = JSON.parse(text);
+  } catch {
+    throw new Error(`Angel One quote response not JSON: ${text.slice(0, 500)}`);
   }
 
-  const json = (await response.json()) as AngelOneQuoteResponse;
-
-  if (json.status !== true) {
-    throw new Error("Angel One quote fetch returned error status");
+  if (!response.ok && json.status !== true) {
+    throw new Error(
+      `Angel One quote failed (${response.status}): ${json.message ?? JSON.stringify(json).slice(0, 300)}`
+    );
   }
 
   const result: Record<string, AngelOneQuoteData> = {};

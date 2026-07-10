@@ -12,6 +12,8 @@ import {
   sendPushNotification
 } from "../services/fcm";
 import { getMarketSummary } from "../services/marketData";
+import { getAngelOneMarketSummary, isAngelOneConfigured } from "../services/angelone";
+import { getBatch, BATCH_SIZE, TOTAL_BATCHES, TOTAL_STOCKS } from "../config/stocks";
 import { sendError, sendSuccess } from "../utils/response";
 
 const app = express();
@@ -39,6 +41,32 @@ app.get("/api/market/summary", async (_req: Request, res: Response) => {
   } catch {
     sendError(res, 500, "Failed to fetch market data");
   }
+});
+
+app.get("/api/market/angelone/summary", async (req: Request, res: Response) => {
+  try {
+    if (!isAngelOneConfigured()) {
+      sendSuccess(res, {
+        configured: false,
+        message: "Angel One is not configured. Set ANGEL_ONE_* environment variables."
+      });
+      return;
+    }
+    const batch = toPositiveNumber(req.query.batch, 0);
+    sendSuccess(res, await getAngelOneMarketSummary(batch || undefined));
+  } catch {
+    sendError(res, 500, "Failed to fetch Angel One market data");
+  }
+});
+
+app.get("/api/market/angelone/status", async (_req: Request, res: Response) => {
+  sendSuccess(res, {
+    configured: isAngelOneConfigured(),
+    hasApiKey: !!process.env.ANGEL_ONE_API_KEY,
+    hasClientId: !!process.env.ANGEL_ONE_CLIENT_ID,
+    hasMpin: !!process.env.ANGEL_ONE_MPIN,
+    hasTotpSecret: !!process.env.ANGEL_ONE_TOTP_SECRET
+  });
 });
 
 app.get("/api/recommendations", async (req: Request, res: Response) => {
@@ -366,8 +394,18 @@ app.get("/api/cron/scan", async (req: Request, res: Response) => {
     return;
   }
 
-  await logCronRun("buy_scan");
-  sendSuccess(res, { status: "accepted", job: "buy_scan" });
+  const batch = toPositiveNumber(req.query.batch, 0);
+  const batchIndex = Math.min(Math.max(batch, 1), TOTAL_BATCHES);
+
+  await logCronRun("buy_scan", batchIndex);
+  sendSuccess(res, {
+    status: "accepted",
+    job: "buy_scan",
+    batch: batchIndex,
+    totalBatches: TOTAL_BATCHES,
+    stockCount: getBatch(batchIndex).length,
+    stocks: getBatch(batchIndex).map((s) => s.symbol)
+  });
 });
 
 app.get("/api/cron/check-positions", async (req: Request, res: Response) => {
@@ -376,8 +414,26 @@ app.get("/api/cron/check-positions", async (req: Request, res: Response) => {
     return;
   }
 
-  await logCronRun("sell_scan");
-  sendSuccess(res, { status: "accepted", job: "sell_scan" });
+  const batch = toPositiveNumber(req.query.batch, 0);
+  const batchIndex = Math.min(Math.max(batch, 1), TOTAL_BATCHES);
+
+  await logCronRun("sell_scan", batchIndex);
+  sendSuccess(res, {
+    status: "accepted",
+    job: "sell_scan",
+    batch: batchIndex,
+    totalBatches: TOTAL_BATCHES,
+    stockCount: getBatch(batchIndex).length,
+    stocks: getBatch(batchIndex).map((s) => s.symbol)
+  });
+});
+
+app.get("/api/stocks/universe", async (_req: Request, res: Response) => {
+  sendSuccess(res, {
+    totalStocks: TOTAL_STOCKS,
+    totalBatches: TOTAL_BATCHES,
+    batchSize: BATCH_SIZE
+  });
 });
 
 function getCurrentMonth(): string {
@@ -526,12 +582,14 @@ function isAuthorizedCronRequest(req: Request): boolean {
   );
 }
 
-async function logCronRun(job: "buy_scan" | "sell_scan"): Promise<void> {
+async function logCronRun(job: "buy_scan" | "sell_scan", batchNumber?: number): Promise<void> {
   const ref = getDb().collection("cronRuns").doc();
   await ref.set({
     id: ref.id,
     userId: env.SINGLE_USER_ID,
     job,
+    batch: batchNumber,
+    totalBatches: TOTAL_BATCHES,
     status: "accepted",
     createdAt: Timestamp.now(),
     updatedAt: Timestamp.now()

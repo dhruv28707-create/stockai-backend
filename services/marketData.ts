@@ -1,4 +1,5 @@
 import yahooFinance from "yahoo-finance2";
+import { getYahooTickers } from "../config/stocks";
 
 interface CacheEntry<T> {
   data: T;
@@ -25,38 +26,7 @@ const NSE_INDICES = [
   { ticker: "^NSEBANK", name: "BANK NIFTY" }
 ];
 
-const NSE_STOCKS = [
-  "RELIANCE.NS",
-  "TCS.NS",
-  "HDFCBANK.NS",
-  "INFY.NS",
-  "ICICIBANK.NS",
-  "HINDUNILVR.NS",
-  "ITC.NS",
-  "SBIN.NS",
-  "BHARTIARTL.NS",
-  "KOTAKBANK.NS",
-  "LT.NS",
-  "WIPRO.NS",
-  "AXISBANK.NS",
-  "MARUTI.NS",
-  "SUNPHARMA.NS",
-  "TITAN.NS",
-  "ADANIPORTS.NS",
-  "ULTRACEMCO.NS",
-  "NTPC.NS",
-  "POWERGRID.NS",
-  "BAJFINANCE.NS",
-  "HCLTECH.NS",
-  "ASIANPAINT.NS",
-  "TATAMOTORS.NS",
-  "M&M.NS",
-  "TRENT.NS",
-  "BEL.NS",
-  "ZOMATO.NS",
-  "EICHERMOT.NS",
-  "COALINDIA.NS"
-];
+const NSE_STOCKS = getYahooTickers();
 
 interface IndexData {
   name: string;
@@ -82,6 +52,7 @@ interface MoverData {
 }
 
 interface MarketSummary {
+  source: string;
   status: string;
   marketStatus: string;
   marketState: string;
@@ -90,7 +61,6 @@ interface MarketSummary {
   indices: IndexData[];
   topGainers: MoverData[];
   topLosers: MoverData[];
-  aiAnalysis: string;
   advanceDeclineRatio: number;
   totalTradedVolume: number;
   updatedAt: string;
@@ -188,6 +158,7 @@ export async function getMarketSummary(): Promise<MarketSummary> {
   const status = getMarketStatus(quotes["^NSEI"]);
 
   const result: MarketSummary = {
+    source: "yahoo",
     status,
     marketStatus: status,
     marketState: status,
@@ -196,7 +167,6 @@ export async function getMarketSummary(): Promise<MarketSummary> {
     indices,
     topGainers,
     topLosers,
-    aiAnalysis: `Market ${status === "OPEN" ? "is trading" : status === "PRE_OPEN" ? "is in pre-open" : "is closed"}. NIFTY 50 at ${indices[0]?.value ?? "N/A"}. ${advancers} advances, ${decliners} declines.`,
     advanceDeclineRatio:
       decliners > 0
         ? Math.round((advancers / decliners) * 100) / 100

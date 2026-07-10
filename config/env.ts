@@ -11,7 +11,11 @@ const envSchema = z.object({
   FIREBASE_PRIVATE_KEY: z.string().min(1),
   FIRESTORE_DATABASE_ID: z.string().min(1).default("default"),
   FCM_ANDROID_DEVICE_TOKEN: z.string().min(1).optional(),
-  CRON_SECRET: z.string().min(1).optional()
+  CRON_SECRET: z.string().min(1).optional(),
+  ANGEL_ONE_TOTP_SECRET: z.string().min(1).optional(),
+  ANGEL_ONE_MPIN: z.string().min(1).optional(),
+  ANGEL_ONE_CLIENT_ID: z.string().min(1).optional(),
+  ANGEL_ONE_API_KEY: z.string().min(1).optional()
 });
 
 const parsed = envSchema.safeParse(process.env);

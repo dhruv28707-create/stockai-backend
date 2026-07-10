@@ -104,15 +104,17 @@ async function fetchYahooQuotes(tickers: string[]): Promise<Record<string, Recor
   const quotes: Record<string, Record<string, unknown>> = {};
   for (let i = 0; i < tickers.length; i += YAHOO_BATCH) {
     const batch = tickers.slice(i, i + YAHOO_BATCH);
-    const results = await Promise.allSettled(
-      batch.map((t) => yahooFinance.quote(t, {}, { validateResult: false }))
-    );
-    batch.forEach((ticker, j) => {
-      const r = results[j];
-      if (r.status === "fulfilled" && r.value) {
-        quotes[ticker] = r.value as Record<string, unknown>;
-      }
-    });
+    let results: (Record<string, unknown> | null)[];
+    try {
+      results = (await yahooFinance.quote(batch, {}, { validateResult: false })) as (Record<string, unknown> | null)[];
+    } catch {
+      continue;
+    }
+    if (Array.isArray(results)) {
+      results.forEach((result, j) => {
+        if (result) quotes[batch[j]] = result;
+      });
+    }
   }
   return quotes;
 }

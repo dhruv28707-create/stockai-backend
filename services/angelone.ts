@@ -240,6 +240,7 @@ export async function getAngelOneMarketSummary(batchNumber?: number): Promise<{
   batch: number | null;
   totalBatches: number;
   batchSize: number;
+  error?: string;
   indices: Array<{
     name: string;
     value: number;
@@ -274,7 +275,35 @@ export async function getAngelOneMarketSummary(batchNumber?: number): Promise<{
   totalTradedVolume: number;
   updatedAt: string;
 }> {
-  const quotes = await getQuotes(batchNumber);
+  // Return a clean closed-market response instead of crashing
+  const closedResponse = (reason: string) => ({
+    source: "angelone",
+    status: "CLOSED",
+    marketStatus: "CLOSED",
+    marketState: "CLOSED",
+    isMarketOpen: false,
+    isOpen: false,
+    batch: batchNumber ?? null,
+    totalBatches: TOTAL_BATCHES,
+    batchSize: BATCH_SIZE,
+    error: reason,
+    indices: [],
+    topGainers: [],
+    topLosers: [],
+    advanceDeclineRatio: 1,
+    totalTradedVolume: 0,
+    updatedAt: new Date().toISOString()
+  });
+
+  let quotes: Record<string, AngelOneQuoteData>;
+  try {
+    quotes = await getQuotes(batchNumber);
+  } catch (err) {
+    const msg = err instanceof Error ? err.message : String(err);
+    // Angel One returns errors like "Market is closed" or session errors outside hours
+    console.warn("[angelone] getQuotes failed:", msg);
+    return closedResponse(msg);
+  }
 
   const indices = NSE_INDICES.map((index) => {
     const q = quotes[index.angelSymbol];

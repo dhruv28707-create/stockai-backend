@@ -12,7 +12,11 @@ import {
   sendPushNotification
 } from "../services/fcm";
 import { getMarketSummary } from "../services/marketData";
-import { getAngelOneMarketSummary, isAngelOneConfigured } from "../services/angelone";
+import {
+  getAngelOneMarketSummary,
+  getQuotes,
+  isAngelOneConfigured
+} from "../services/angelone";
 import { getBatch, BATCH_SIZE, TOTAL_BATCHES, TOTAL_STOCKS } from "../config/stocks";
 import { sendError, sendSuccess } from "../utils/response";
 
@@ -27,6 +31,8 @@ app.use(
 );
 app.use(express.json());
 
+// ─── Health & Info ────────────────────────────────────────────────────────────
+
 app.get("/api", (_req: Request, res: Response) => {
   sendSuccess(res, { service: "StockAI Backend", storage: "firebase", version: "1.0.0" });
 });
@@ -34,6 +40,8 @@ app.get("/api", (_req: Request, res: Response) => {
 app.get("/api/health", (_req: Request, res: Response) => {
   sendSuccess(res, { status: "ready" });
 });
+
+// ─── Market Data ──────────────────────────────────────────────────────────────
 
 app.get("/api/market/summary", async (_req: Request, res: Response) => {
   try {
@@ -69,6 +77,8 @@ app.get("/api/market/angelone/status", async (_req: Request, res: Response) => {
   });
 });
 
+// ─── Recommendations ──────────────────────────────────────────────────────────
+
 app.get("/api/recommendations", async (req: Request, res: Response) => {
   try {
     const status = typeof req.query.status === "string" ? req.query.status : "pending";
@@ -89,7 +99,9 @@ app.get("/api/recommendations", async (req: Request, res: Response) => {
     const items = snap.docs
       .map((doc) => normalizeDoc(doc.id, doc.data()))
       .filter((item) => {
-        const entryPrice = Number(item.entryPrice ?? item.entry ?? item.currentPrice ?? 0);
+        const entryPrice = Number(
+          item.entryPrice ?? item.entry ?? item.currentPrice ?? 0
+        );
         return !entryPrice || entryPrice <= maxEntry;
       });
 
@@ -98,6 +110,8 @@ app.get("/api/recommendations", async (req: Request, res: Response) => {
     sendError(res, 500, "Failed to fetch recommendations");
   }
 });
+
+// ─── Portfolio ────────────────────────────────────────────────────────────────
 
 app.get("/api/portfolio", async (_req: Request, res: Response) => {
   try {
@@ -116,7 +130,9 @@ app.get("/api/portfolio", async (_req: Request, res: Response) => {
         .get()
     ]);
 
-    const openPositions = positionsSnap.docs.map((doc) => normalizeDoc(doc.id, doc.data()));
+    const openPositions = positionsSnap.docs.map((doc) =>
+      normalizeDoc(doc.id, doc.data())
+    );
     const portfolioDoc = portfolioSnap.docs[0];
 
     sendSuccess(res, {
@@ -130,6 +146,8 @@ app.get("/api/portfolio", async (_req: Request, res: Response) => {
     sendError(res, 500, "Failed to fetch portfolio");
   }
 });
+
+// ─── Device / Notification Registration ──────────────────────────────────────
 
 const registerDeviceHandler = async (req: Request, res: Response) => {
   try {
@@ -207,7 +225,8 @@ const testNotificationHandler = async (req: Request, res: Response) => {
     const tokenStatusBeforeSend = await getNotificationTokenStatus();
     const result = await sendPushNotification(
       getStringFromRequest(req, "title") ?? "StockAI test notification",
-      getStringFromRequest(req, "body") ?? "Your Firebase notification setup is connected.",
+      getStringFromRequest(req, "body") ??
+        "Your Firebase notification setup is connected.",
       "BUY_ALERT",
       "HIGH"
     );
@@ -269,6 +288,8 @@ app.get("/api/notifications", async (req: Request, res: Response) => {
   }
 });
 
+// ─── Capital & Monthly Setup ──────────────────────────────────────────────────
+
 app.get("/api/capital/current", async (_req: Request, res: Response) => {
   try {
     sendSuccess(res, toCapitalSetupResponse(await getCurrentMonthlySetup()));
@@ -308,7 +329,10 @@ app.get("/api/monthly/setup", async (_req: Request, res: Response) => {
 const saveCapitalSetupHandler = async (req: Request, res: Response) => {
   try {
     const capital = toPositiveNumber(
-      req.body?.capital ?? req.body?.amount ?? req.body?.budget ?? req.body?.monthlyCapital,
+      req.body?.capital ??
+        req.body?.amount ??
+        req.body?.budget ??
+        req.body?.monthlyCapital,
       0
     );
     if (!capital) {
@@ -316,7 +340,8 @@ const saveCapitalSetupHandler = async (req: Request, res: Response) => {
       return;
     }
 
-    const month = typeof req.body?.month === "string" ? req.body.month : getCurrentMonth();
+    const month =
+      typeof req.body?.month === "string" ? req.body.month : getCurrentMonth();
     const riskLevel = normalizeRiskLevel(req.body?.riskLevel ?? req.body?.risk);
     const tradingStyle =
       typeof (req.body?.tradingStyle ?? req.body?.style) === "string" &&
@@ -368,7 +393,8 @@ app.post("/api/capital/profit", async (req: Request, res: Response) => {
       return;
     }
 
-    const month = typeof req.body?.month === "string" ? req.body.month : getCurrentMonth();
+    const month =
+      typeof req.body?.month === "string" ? req.body.month : getCurrentMonth();
     await getDb()
       .collection(collectionNames.monthlySetup)
       .doc(`${env.SINGLE_USER_ID}_${month}`)
@@ -388,25 +414,44 @@ app.post("/api/capital/profit", async (req: Request, res: Response) => {
   }
 });
 
+// ─── Cron: Buy Scan (called by cron-job.org, one batch per call) ──────────────
+//
+// cron-job.org hits these URLs on schedule:
+//   12:00 → /api/cron/scan?batch=1
+//   12:05 → /api/cron/scan?batch=2
+//   12:10 → /api/cron/scan?batch=3
+//   12:15 → /api/cron/scan?batch=4
+//   12:20 → /api/cron/scan?batch=5
+
 app.get("/api/cron/scan", async (req: Request, res: Response) => {
   if (!isAuthorizedCronRequest(req)) {
     sendError(res, 401, "Unauthorized cron request");
     return;
   }
 
-  const batch = toPositiveNumber(req.query.batch, 0);
-  const batchIndex = Math.min(Math.max(batch, 1), TOTAL_BATCHES);
+  const batchParam = toPositiveNumber(req.query.batch, 1);
+  const batchIndex = Math.min(Math.max(batchParam, 1), TOTAL_BATCHES);
+  const stocks = getBatch(batchIndex);
 
-  await logCronRun("buy_scan", batchIndex);
-  sendSuccess(res, {
+  // Respond immediately so Vercel doesn't time out waiting for us.
+  // The actual scan runs after this line — Vercel keeps the function alive
+  // until the async work resolves (or hits maxDuration: 60 in vercel.json).
+  res.status(200).json({
     status: "accepted",
     job: "buy_scan",
     batch: batchIndex,
     totalBatches: TOTAL_BATCHES,
-    stockCount: getBatch(batchIndex).length,
-    stocks: getBatch(batchIndex).map((s) => s.symbol)
+    stockCount: stocks.length,
+    stocks: stocks.map((s) => s.symbol)
+  });
+
+  // Kick off the real work after responding
+  runBuyScan(batchIndex, stocks).catch((err) => {
+    console.error(`[buy_scan] batch ${batchIndex} failed:`, err);
   });
 });
+
+// ─── Cron: Sell / Position Check ─────────────────────────────────────────────
 
 app.get("/api/cron/check-positions", async (req: Request, res: Response) => {
   if (!isAuthorizedCronRequest(req)) {
@@ -414,19 +459,25 @@ app.get("/api/cron/check-positions", async (req: Request, res: Response) => {
     return;
   }
 
-  const batch = toPositiveNumber(req.query.batch, 0);
-  const batchIndex = Math.min(Math.max(batch, 1), TOTAL_BATCHES);
+  const batchParam = toPositiveNumber(req.query.batch, 1);
+  const batchIndex = Math.min(Math.max(batchParam, 1), TOTAL_BATCHES);
+  const stocks = getBatch(batchIndex);
 
-  await logCronRun("sell_scan", batchIndex);
-  sendSuccess(res, {
+  res.status(200).json({
     status: "accepted",
     job: "sell_scan",
     batch: batchIndex,
     totalBatches: TOTAL_BATCHES,
-    stockCount: getBatch(batchIndex).length,
-    stocks: getBatch(batchIndex).map((s) => s.symbol)
+    stockCount: stocks.length,
+    stocks: stocks.map((s) => s.symbol)
+  });
+
+  runSellScan(batchIndex).catch((err) => {
+    console.error(`[sell_scan] batch ${batchIndex} failed:`, err);
   });
 });
+
+// ─── Stocks Universe ──────────────────────────────────────────────────────────
 
 app.get("/api/stocks/universe", async (_req: Request, res: Response) => {
   sendSuccess(res, {
@@ -435,6 +486,292 @@ app.get("/api/stocks/universe", async (_req: Request, res: Response) => {
     batchSize: BATCH_SIZE
   });
 });
+
+// ─── Buy Scan Logic ───────────────────────────────────────────────────────────
+
+interface StockInfo {
+  symbol: string;
+  name: string;
+  sector: string;
+}
+
+async function runBuyScan(batchIndex: number, stocks: StockInfo[]): Promise<void> {
+  await logCronRun("buy_scan", batchIndex, "running");
+
+  if (!isAngelOneConfigured()) {
+    await logCronRun("buy_scan", batchIndex, "skipped", "Angel One not configured");
+    return;
+  }
+
+  let quotes: Record<
+    string,
+    {
+      ltp: number;
+      dayChange: number;
+      dayChangePercentage: number;
+      volume: number;
+      high: number;
+      low: number;
+      open: number;
+      close: number;
+    }
+  >;
+
+  try {
+    quotes = (await getQuotes(batchIndex)) as typeof quotes;
+  } catch (err) {
+    await logCronRun("buy_scan", batchIndex, "failed", getErrorMessage(err));
+    return;
+  }
+
+  // Find stocks showing strong upward movement
+  const candidates = stocks
+    .filter((s) => {
+      const q = quotes[s.symbol];
+      if (!q) return false;
+      // Criteria: up >1.5% on the day with decent volume
+      return q.dayChangePercentage >= 1.5 && q.volume > 50_000;
+    })
+    .map((s) => {
+      const q = quotes[s.symbol];
+      return {
+        symbol: s.symbol,
+        name: s.name,
+        sector: s.sector,
+        price: q.ltp,
+        change: q.dayChange,
+        changePercent: q.dayChangePercentage,
+        volume: q.volume,
+        high: q.high,
+        low: q.low
+      };
+    })
+    .sort((a, b) => b.changePercent - a.changePercent);
+
+  if (candidates.length === 0) {
+    await logCronRun("buy_scan", batchIndex, "completed", "No candidates found");
+    return;
+  }
+
+  // Use AI to pick the best opportunity from this batch's candidates
+  const aiPick = await analyzeWithAI(candidates, "buy");
+
+  if (!aiPick) {
+    await logCronRun("buy_scan", batchIndex, "completed", "AI found no strong signal");
+    return;
+  }
+
+  // Save recommendation to Firestore
+  const recRef = getDb().collection(collectionNames.recommendations).doc();
+  await recRef.set({
+    id: recRef.id,
+    userId: env.SINGLE_USER_ID,
+    symbol: aiPick.symbol,
+    name: aiPick.name,
+    action: "BUY",
+    currentPrice: aiPick.price,
+    entryPrice: aiPick.price,
+    changePercent: aiPick.changePercent,
+    reason: aiPick.reason,
+    confidence: aiPick.confidence,
+    sector: aiPick.sector,
+    status: "pending",
+    source: "buy_scan",
+    batch: batchIndex,
+    createdAt: Timestamp.now(),
+    updatedAt: Timestamp.now()
+  });
+
+  // Send push notification
+  await sendPushNotification(
+    `📈 Buy Signal: ${aiPick.symbol}`,
+    `${aiPick.name} is up ${aiPick.changePercent.toFixed(2)}% — ${aiPick.reason}`,
+    "BUY_ALERT",
+    "HIGH",
+    aiPick.symbol
+  );
+
+  await logCronRun("buy_scan", batchIndex, "completed", `Notified: ${aiPick.symbol}`);
+}
+
+// ─── Sell Scan Logic ──────────────────────────────────────────────────────────
+
+async function runSellScan(batchIndex: number): Promise<void> {
+  await logCronRun("sell_scan", batchIndex, "running");
+
+  // Fetch open positions from Firestore
+  const positionsSnap = await getDb()
+    .collection(collectionNames.positions)
+    .where("userId", "==", env.SINGLE_USER_ID)
+    .where("status", "==", "open")
+    .get();
+
+  if (positionsSnap.empty) {
+    await logCronRun("sell_scan", batchIndex, "completed", "No open positions");
+    return;
+  }
+
+  if (!isAngelOneConfigured()) {
+    await logCronRun("sell_scan", batchIndex, "skipped", "Angel One not configured");
+    return;
+  }
+
+  const positions = positionsSnap.docs.map((doc) => normalizeDoc(doc.id, doc.data()));
+
+  let quotes: Record<
+    string,
+    { ltp: number; dayChange: number; dayChangePercentage: number; volume: number }
+  >;
+  try {
+    // Fetch quotes for all batches to cover all open positions
+    quotes = (await getQuotes()) as typeof quotes;
+  } catch (err) {
+    await logCronRun("sell_scan", batchIndex, "failed", getErrorMessage(err));
+    return;
+  }
+
+  for (const position of positions) {
+    const symbol = String(position.symbol ?? "");
+    const q = quotes[symbol];
+    if (!q) continue;
+
+    const entryPrice = Number(position.entryPrice ?? position.entry ?? 0);
+    if (!entryPrice) continue;
+
+    const pnlPercent = ((q.ltp - entryPrice) / entryPrice) * 100;
+
+    // Alert if down more than 3% from entry (stop-loss zone)
+    if (pnlPercent <= -3) {
+      await sendPushNotification(
+        `🔴 Stop-Loss Alert: ${symbol}`,
+        `${symbol} is down ${Math.abs(pnlPercent).toFixed(2)}% from your entry of ₹${entryPrice}. Consider exiting.`,
+        "STOP_LOSS_ALERT",
+        "HIGH",
+        symbol
+      );
+    }
+    // Alert if up more than 5% from entry (take-profit zone)
+    else if (pnlPercent >= 5) {
+      await sendPushNotification(
+        `🟢 Profit Target: ${symbol}`,
+        `${symbol} is up ${pnlPercent.toFixed(2)}% from your entry of ₹${entryPrice}. Consider booking profits.`,
+        "SELL_ALERT",
+        "HIGH",
+        symbol
+      );
+    }
+  }
+
+  await logCronRun("sell_scan", batchIndex, "completed");
+}
+
+// ─── AI Analysis ─────────────────────────────────────────────────────────────
+
+interface Candidate {
+  symbol: string;
+  name: string;
+  sector: string;
+  price: number;
+  change: number;
+  changePercent: number;
+  volume: number;
+  high: number;
+  low: number;
+}
+
+interface AIPick {
+  symbol: string;
+  name: string;
+  sector: string;
+  price: number;
+  changePercent: number;
+  reason: string;
+  confidence: "HIGH" | "MEDIUM" | "LOW";
+}
+
+async function analyzeWithAI(
+  candidates: Candidate[],
+  type: "buy" | "sell"
+): Promise<AIPick | null> {
+  const prompt = `You are a stock market analyst for NSE (India). Analyze these ${type === "buy" ? "bullish" : "bearish"} stock candidates and pick the SINGLE best ${type} opportunity. Reply ONLY with valid JSON, no markdown, no explanation.
+
+Candidates:
+${JSON.stringify(candidates, null, 2)}
+
+Return this exact JSON shape:
+{
+  "symbol": "STOCK_SYMBOL",
+  "name": "Stock Name",
+  "sector": "Sector",
+  "price": 0,
+  "changePercent": 0,
+  "reason": "One sentence explanation under 20 words",
+  "confidence": "HIGH" | "MEDIUM" | "LOW"
+}
+
+If none of these stocks show a genuinely strong ${type} signal, return: null`;
+
+  if (!env.GEMINI_API_KEY) {
+    // No AI key at all — fall back to top mover
+    const top = candidates[0];
+    return {
+      symbol: top.symbol,
+      name: top.name,
+      sector: top.sector,
+      price: top.price,
+      changePercent: top.changePercent,
+      reason: `Strong upward momentum of ${top.changePercent.toFixed(2)}%`,
+      confidence: "MEDIUM"
+    };
+  }
+
+  try {
+    const response = await fetch(
+      `https://generativelanguage.googleapis.com/v1beta/models/gemini-1.5-flash:generateContent?key=${env.GEMINI_API_KEY}`,
+      {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({
+          contents: [{ parts: [{ text: prompt }] }],
+          generationConfig: {
+            temperature: 0.2,
+            maxOutputTokens: 300
+          }
+        })
+      }
+    );
+
+    const data = (await response.json()) as {
+      candidates: Array<{
+        content: { parts: Array<{ text: string }> };
+      }>;
+    };
+
+    const text = data.candidates?.[0]?.content?.parts?.[0]?.text?.trim() ?? "";
+
+    // Strip any markdown fences Gemini might add
+    const clean = text.replace(/```json|```/g, "").trim();
+
+    if (clean === "null" || clean === "") return null;
+
+    return JSON.parse(clean) as AIPick;
+  } catch (err) {
+    console.error("[analyzeWithAI] Gemini failed:", getErrorMessage(err));
+    // Fallback: top candidate without AI reasoning
+    const top = candidates[0];
+    return {
+      symbol: top.symbol,
+      name: top.name,
+      sector: top.sector,
+      price: top.price,
+      changePercent: top.changePercent,
+      reason: `Strong momentum: up ${top.changePercent.toFixed(2)}% today`,
+      confidence: "LOW"
+    };
+  }
+}
+
+// ─── Helpers ──────────────────────────────────────────────────────────────────
 
 function getCurrentMonth(): string {
   const parts = new Intl.DateTimeFormat("en-CA", {
@@ -510,7 +847,6 @@ function normalizeRiskLevel(value: unknown): RiskLevel {
   if (normalized === "low" || normalized === "medium" || normalized === "high") {
     return normalized;
   }
-
   return "medium";
 }
 
@@ -549,11 +885,13 @@ function getStringFromRequest(req: Request, field: string): string | null {
   return null;
 }
 
-function getNotificationFailureMessage(error: string | undefined, hadToken: boolean): string {
+function getNotificationFailureMessage(
+  error: string | undefined,
+  hadToken: boolean
+): string {
   if (!hadToken) {
     return "No FCM token is saved. The frontend must register the Android FCM token first.";
   }
-
   return error ?? "FCM rejected the test notification.";
 }
 
@@ -570,7 +908,6 @@ function getErrorCode(error: unknown): string | undefined {
   ) {
     return error.code;
   }
-
   return undefined;
 }
 
@@ -582,7 +919,12 @@ function isAuthorizedCronRequest(req: Request): boolean {
   );
 }
 
-async function logCronRun(job: "buy_scan" | "sell_scan", batchNumber?: number): Promise<void> {
+async function logCronRun(
+  job: "buy_scan" | "sell_scan",
+  batchNumber: number,
+  status: "running" | "completed" | "failed" | "skipped" | "accepted" = "accepted",
+  message?: string
+): Promise<void> {
   const ref = getDb().collection("cronRuns").doc();
   await ref.set({
     id: ref.id,
@@ -590,7 +932,8 @@ async function logCronRun(job: "buy_scan" | "sell_scan", batchNumber?: number): 
     job,
     batch: batchNumber,
     totalBatches: TOTAL_BATCHES,
-    status: "accepted",
+    status,
+    message: message ?? null,
     createdAt: Timestamp.now(),
     updatedAt: Timestamp.now()
   });

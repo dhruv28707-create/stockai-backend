@@ -15,7 +15,8 @@ const envSchema = z.object({
   ANGEL_ONE_TOTP_SECRET: z.string().min(1).optional(),
   ANGEL_ONE_MPIN: z.string().min(1).optional(),
   ANGEL_ONE_CLIENT_ID: z.string().min(1).optional(),
-  ANGEL_ONE_API_KEY: z.string().min(1).optional()
+  ANGEL_ONE_API_KEY: z.string().min(1).optional(),
+  GEMINI_API_KEY: z.string().min(1).optional() // ← fixed: proper Zod field
 });
 
 const parsed = envSchema.safeParse(process.env);

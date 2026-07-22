@@ -1,6 +1,11 @@
 import { createHmac } from "node:crypto";
 import { env } from "../config/env";
-import { getAngelSymbols, getStockSymbols, BATCH_SIZE, TOTAL_BATCHES } from "../config/stocks";
+import {
+  getAngelSymbols,
+  getStockSymbols,
+  BATCH_SIZE,
+  TOTAL_BATCHES
+} from "../config/stocks";
 
 const BASE_URL = "https://apiconnect.angelbroking.com";
 
@@ -59,7 +64,12 @@ function generateTotp(secret: string): string {
 }
 
 export function isAngelOneConfigured(): boolean {
-  return !!(env.ANGEL_ONE_API_KEY && env.ANGEL_ONE_CLIENT_ID && env.ANGEL_ONE_MPIN && env.ANGEL_ONE_TOTP_SECRET);
+  return !!(
+    env.ANGEL_ONE_API_KEY &&
+    env.ANGEL_ONE_CLIENT_ID &&
+    env.ANGEL_ONE_MPIN &&
+    env.ANGEL_ONE_TOTP_SECRET
+  );
 }
 
 function buildHeaders(apiKey: string, authToken?: string): Record<string, string> {
@@ -69,9 +79,10 @@ function buildHeaders(apiKey: string, authToken?: string): Record<string, string
     "X-ClientLocalIP": "192.168.1.100",
     "X-ClientPublicIP": "103.95.97.4",
     "X-MACAddress": "00:1A:2B:3C:4D:5E",
-    "Accept": "application/json",
+    Accept: "application/json",
     "Content-Type": "application/json",
-    "User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36",
+    "User-Agent":
+      "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36",
     ...(authToken ? { Authorization: `Bearer ${authToken}` } : {})
   };
 }
@@ -109,7 +120,9 @@ export async function login(): Promise<AngelOneTokens> {
   const loginText = await response.text();
 
   if (!response.ok) {
-    throw new Error(`Angel One login failed (${response.status}): ${loginText.slice(0, 300)}`);
+    throw new Error(
+      `Angel One login failed (${response.status}): ${loginText.slice(0, 300)}`
+    );
   }
 
   let json: LoginResponse;
@@ -120,7 +133,9 @@ export async function login(): Promise<AngelOneTokens> {
   }
 
   if (json.status !== true && json.errorCode) {
-    throw new Error(`Angel One login error: ${json.message ?? json.error ?? JSON.stringify(json).slice(0, 300)}`);
+    throw new Error(
+      `Angel One login error: ${json.message ?? json.error ?? JSON.stringify(json).slice(0, 300)}`
+    );
   }
 
   const tokens: AngelOneTokens = {
@@ -140,7 +155,7 @@ export async function refreshSession(): Promise<AngelOneTokens> {
   return login();
 }
 
-interface AngelOneQuoteData {
+export interface AngelOneQuoteData {
   tradingSymbol: string;
   symbolToken: string;
   open: number;
@@ -171,9 +186,15 @@ function fromAngelSymbol(angelSymbol: string): string {
   return angelSymbol.replace("-EQ", "");
 }
 
-export async function getQuotes(batchNumber?: number): Promise<Record<string, AngelOneQuoteData>> {
+// ← exported so index.ts can call it directly in the scan routes
+export async function getQuotes(
+  batchNumber?: number
+): Promise<Record<string, AngelOneQuoteData>> {
   const tokens = await login();
-  const symbols = [...NSE_INDICES.map((i) => i.angelSymbol), ...getAngelSymbols(batchNumber)];
+  const symbols = [
+    ...NSE_INDICES.map((i) => i.angelSymbol),
+    ...getAngelSymbols(batchNumber)
+  ];
 
   const response = await fetch(`${BASE_URL}/rest/secure/angelbroking/market/v1/quote`, {
     method: "POST",
@@ -311,9 +332,12 @@ export async function getAngelOneMarketSummary(batchNumber?: number): Promise<{
     indices,
     topGainers,
     topLosers,
-    advanceDeclineRatio: decliners > 0
-      ? Math.round((advancers / decliners) * 100) / 100
-      : advancers > 0 ? 99 : 1,
+    advanceDeclineRatio:
+      decliners > 0
+        ? Math.round((advancers / decliners) * 100) / 100
+        : advancers > 0
+          ? 99
+          : 1,
     totalTradedVolume: totalVolume,
     updatedAt: new Date().toISOString()
   };

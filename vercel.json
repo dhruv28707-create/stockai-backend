@@ -10,10 +10,6 @@
   },
   "crons": [
     {
-      "path": "/api/cron/scan",
-      "schedule": "30 6 * * 1-5"
-    },
-    {
       "path": "/api/cron/check-positions",
       "schedule": "30 8 * * 1-5"
     }

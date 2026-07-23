@@ -294,7 +294,7 @@ export async function getAngelOneMarketSummary(batchNumber?: number): Promise<{
     totalTradedVolume: 0,
     updatedAt: new Date().toISOString()
   });
-
+  //
   let quotes: Record<string, AngelOneQuoteData>;
   try {
     quotes = await getQuotes(batchNumber);

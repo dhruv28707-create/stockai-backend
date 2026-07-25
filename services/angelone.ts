@@ -106,11 +106,15 @@ export async function login(): Promise<AngelOneTokens> {
     return tokenCache.tokens;
   }
 
-  const totp = generateTotp(env.ANGEL_ONE_TOTP_SECRET!);
+  if (!env.ANGEL_ONE_TOTP_SECRET || !env.ANGEL_ONE_API_KEY || !env.ANGEL_ONE_CLIENT_ID || !env.ANGEL_ONE_MPIN) {
+    throw new Error("Angel One is not fully configured. Set ANGEL_ONE_* environment variables.");
+  }
+
+  const totp = generateTotp(env.ANGEL_ONE_TOTP_SECRET);
 
   const response = await fetch(`${BASE_URL}/rest/auth/angelbroking/user/login/v1`, {
     method: "POST",
-    headers: buildHeaders(env.ANGEL_ONE_API_KEY!),
+    headers: buildHeaders(env.ANGEL_ONE_API_KEY),
     body: JSON.stringify({
       clientcode: env.ANGEL_ONE_CLIENT_ID,
       password: env.ANGEL_ONE_MPIN,
@@ -143,7 +147,7 @@ export async function login(): Promise<AngelOneTokens> {
     authToken: json.data?.jwtToken ?? json.data?.authToken ?? "",
     refreshToken: json.data?.refreshToken ?? "",
     feedToken: json.data?.feedToken ?? "",
-    clientId: env.ANGEL_ONE_CLIENT_ID!
+    clientId: env.ANGEL_ONE_CLIENT_ID
   };
 
   tokenCache = { tokens, expiresAt: Date.now() + 20 * 60 * 60 * 1000 };
@@ -191,6 +195,10 @@ function fromAngelSymbol(angelSymbol: string): string {
 export async function getQuotes(
   batchNumber?: number
 ): Promise<Record<string, AngelOneQuoteData>> {
+  if (!env.ANGEL_ONE_API_KEY) {
+    throw new Error("Angel One API key is not configured.");
+  }
+
   const tokens = await login();
   const symbols = [
     ...NSE_INDICES.map((i) => i.angelSymbol),
@@ -199,7 +207,7 @@ export async function getQuotes(
 
   const response = await fetch(`${BASE_URL}/rest/secure/angelbroking/market/v1/quote`, {
     method: "POST",
-    headers: buildHeaders(env.ANGEL_ONE_API_KEY!, tokens.authToken),
+    headers: buildHeaders(env.ANGEL_ONE_API_KEY, tokens.authToken),
     body: JSON.stringify({
       mode: "FULL",
       tradingSymbols: symbols.map((s) => `NSE:${s.toUpperCase()}`)

@@ -17,7 +17,7 @@ import {
   getQuotes,
   isAngelOneConfigured
 } from "../services/angelone";
-import { getBatch, BATCH_SIZE, TOTAL_BATCHES, TOTAL_STOCKS } from "../config/stocks";
+import { getBatch, BATCH_SIZE, TOTAL_BATCHES, TOTAL_STOCKS, type StockInfo } from "../config/stocks";
 import { sendError, sendSuccess } from "../utils/response";
 import { getErrorMessage, getErrorCode } from "../utils/helpers";
 import { analyzeWithAI } from "../services/ai";
@@ -83,10 +83,10 @@ app.get("/api/market/angelone/summary", async (req: Request, res: Response) => {
 app.get("/api/market/angelone/status", async (_req: Request, res: Response) => {
   sendSuccess(res, {
     configured: isAngelOneConfigured(),
-    hasApiKey: !!process.env.ANGEL_ONE_API_KEY,
-    hasClientId: !!process.env.ANGEL_ONE_CLIENT_ID,
-    hasMpin: !!process.env.ANGEL_ONE_MPIN,
-    hasTotpSecret: !!process.env.ANGEL_ONE_TOTP_SECRET
+    hasApiKey: !!env.ANGEL_ONE_API_KEY,
+    hasClientId: !!env.ANGEL_ONE_CLIENT_ID,
+    hasMpin: !!env.ANGEL_ONE_MPIN,
+    hasTotpSecret: !!env.ANGEL_ONE_TOTP_SECRET
   });
 });
 
@@ -94,7 +94,8 @@ app.get("/api/market/angelone/status", async (_req: Request, res: Response) => {
 
 app.get("/api/recommendations", async (req: Request, res: Response) => {
   try {
-    const status = typeof req.query.status === "string" ? req.query.status : "pending";
+    const statusParam = typeof req.query.status === "string" ? req.query.status : "";
+    const status = statusParam && statusParam !== "all" ? statusParam : undefined;
     const action = typeof req.query.action === "string" ? req.query.action : undefined;
     const limit = Math.min(toPositiveNumber(req.query.limit, 50), 100);
     const setup = await getCurrentMonthlySetup();
@@ -119,7 +120,8 @@ app.get("/api/recommendations", async (req: Request, res: Response) => {
       });
 
     sendSuccess(res, { items, count: items.length });
-  } catch {
+  } catch (error) {
+    logger.error("[recommendations] Failed to fetch", toErrorContext(error));
     sendError(res, 500, "Failed to fetch recommendations");
   }
 });
@@ -155,7 +157,8 @@ app.get("/api/portfolio", async (_req: Request, res: Response) => {
       openPositionCount: openPositions.length,
       openPositions
     });
-  } catch {
+  } catch (error) {
+    logger.error("[portfolio] Failed to fetch", toErrorContext(error));
     sendError(res, 500, "Failed to fetch portfolio");
   }
 });
@@ -177,7 +180,8 @@ const registerDeviceHandler = async (req: Request, res: Response) => {
       tokenPrefix: `${token.slice(0, 12)}...`,
       tokenLength: token.length
     });
-  } catch {
+  } catch (error) {
+    logger.error("[device] Failed to register", toErrorContext(error));
     sendError(res, 500, "Failed to register device");
   }
 };
@@ -204,7 +208,8 @@ const notificationStatusHandler = async (_req: Request, res: Response) => {
           )
         : null
     });
-  } catch {
+  } catch (error) {
+    logger.error("[notifications] Failed to fetch status", toErrorContext(error));
     sendError(res, 500, "Failed to fetch notification status");
   }
 };
@@ -269,7 +274,8 @@ app.get("/api/notifications", async (req: Request, res: Response) => {
     const items = snap.docs.map((doc) => normalizeDoc(doc.id, doc.data()));
 
     sendSuccess(res, { items, count: items.length });
-  } catch {
+  } catch (error) {
+    logger.error("[notifications] Failed to fetch list", toErrorContext(error));
     sendError(res, 500, "Failed to fetch notifications");
   }
 });
@@ -279,7 +285,8 @@ app.get("/api/notifications", async (req: Request, res: Response) => {
 app.get("/api/capital/current", async (_req: Request, res: Response) => {
   try {
     sendSuccess(res, toCapitalSetupResponse(await getCurrentMonthlySetup()));
-  } catch {
+  } catch (error) {
+    logger.error("[capital] Failed to fetch current", toErrorContext(error));
     sendError(res, 500, "Failed to fetch monthly capital");
   }
 });
@@ -329,7 +336,8 @@ const saveCapitalSetupHandler = async (req: Request, res: Response) => {
       .set({ ...setup, createdAt: now }, { merge: true });
 
     sendSuccess(res, toCapitalSetupResponse(normalizeDoc(docId, setup)));
-  } catch {
+  } catch (error) {
+    logger.error("[capital] Failed to save budget", toErrorContext(error));
     sendError(res, 500, "Failed to set monthly capital");
   }
 };
@@ -360,7 +368,8 @@ app.post("/api/capital/profit", async (req: Request, res: Response) => {
       );
 
     sendSuccess(res, { logged: true });
-  } catch {
+  } catch (error) {
+    logger.error("[capital] Failed to log profit", toErrorContext(error));
     sendError(res, 500, "Failed to log profit");
   }
 });
@@ -439,12 +448,6 @@ app.get("/api/stocks/universe", async (_req: Request, res: Response) => {
 });
 
 // ─── Buy Scan Logic ───────────────────────────────────────────────────────────
-
-interface StockInfo {
-  symbol: string;
-  name: string;
-  sector: string;
-}
 
 async function runBuyScan(batchIndex: number, stocks: StockInfo[]): Promise<void> {
   await logCronRun("buy_scan", batchIndex, "running");

@@ -28,6 +28,8 @@ export async function analyzeWithAI(
   candidates: Candidate[],
   type: "buy" | "sell"
 ): Promise<AIPick | null> {
+  if (candidates.length === 0) return null;
+
   const prompt = `You are a stock market analyst for NSE (India). Analyze these ${type === "buy" ? "bullish" : "bearish"} stock candidates and pick the SINGLE best ${type} opportunity. Reply ONLY with valid JSON, no markdown, no explanation.
 
 Candidates:

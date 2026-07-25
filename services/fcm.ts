@@ -2,6 +2,7 @@ import { Timestamp } from "firebase-admin/firestore";
 import { env } from "../config/env";
 import { getDb, getFcm } from "../firebase/admin";
 import { collectionNames } from "../models";
+import { getErrorCode } from "../utils/helpers";
 
 const TOKEN_DOC_ID = "fcm_device_token";
 
@@ -195,15 +196,4 @@ function getNotificationChannel(type: string): { channelId: string; sound: strin
   return { channelId: "buy_signals", sound: "buy_signal" };
 }
 
-function getErrorCode(error: unknown): string | undefined {
-  if (
-    typeof error === "object" &&
-    error !== null &&
-    "code" in error &&
-    typeof error.code === "string"
-  ) {
-    return error.code;
-  }
 
-  return undefined;
-}

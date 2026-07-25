@@ -16,7 +16,11 @@ const envSchema = z.object({
   ANGEL_ONE_MPIN: z.string().min(1).optional(),
   ANGEL_ONE_CLIENT_ID: z.string().min(1).optional(),
   ANGEL_ONE_API_KEY: z.string().min(1).optional(),
-  GEMINI_API_KEY: z.string().min(1).optional() // ← fixed: proper Zod field
+  GEMINI_API_KEY: z.string().min(1).optional(),
+  CORS_ORIGIN: z.string().optional().default("*"),
+  ANGEL_ONE_CLIENT_LOCAL_IP: z.string().optional().default("192.168.1.100"),
+  ANGEL_ONE_CLIENT_PUBLIC_IP: z.string().optional().default("103.95.97.4"),
+  ANGEL_ONE_MAC_ADDRESS: z.string().optional().default("00:1A:2B:3C:4D:5E")
 });
 
 const parsed = envSchema.safeParse(process.env);

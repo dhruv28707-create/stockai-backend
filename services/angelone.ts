@@ -76,9 +76,9 @@ function buildHeaders(apiKey: string, authToken?: string): Record<string, string
   return {
     "X-PrivateKey": apiKey,
     "X-SourceID": "WEB",
-    "X-ClientLocalIP": "192.168.1.100",
-    "X-ClientPublicIP": "103.95.97.4",
-    "X-MACAddress": "00:1A:2B:3C:4D:5E",
+    "X-ClientLocalIP": env.ANGEL_ONE_CLIENT_LOCAL_IP,
+    "X-ClientPublicIP": env.ANGEL_ONE_CLIENT_PUBLIC_IP,
+    "X-MACAddress": env.ANGEL_ONE_MAC_ADDRESS,
     Accept: "application/json",
     "Content-Type": "application/json",
     "User-Agent":
@@ -213,7 +213,7 @@ export async function getQuotes(
     throw new Error(`Angel One quote response not JSON: ${text.slice(0, 500)}`);
   }
 
-  if (!response.ok && json.status !== true) {
+  if (!response.ok || json.status !== true) {
     throw new Error(
       `Angel One quote failed (${response.status}): ${json.message ?? JSON.stringify(json).slice(0, 300)}`
     );

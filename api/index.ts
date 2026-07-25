@@ -24,7 +24,7 @@ const app = express();
 
 app.use(
   cors({
-    origin: "*",
+    origin: env.CORS_ORIGIN,
     methods: ["GET", "POST", "PUT", "PATCH", "DELETE", "OPTIONS"],
     allowedHeaders: ["Content-Type", "Accept", "Authorization", "x-cron-secret"]
   })
@@ -727,10 +727,10 @@ If none of these stocks show a genuinely strong ${type} signal, return: null`;
 
   try {
     const response = await fetch(
-      `https://generativelanguage.googleapis.com/v1beta/models/gemini-1.5-flash:generateContent?key=${env.GEMINI_API_KEY}`,
+      `https://generativelanguage.googleapis.com/v1beta/models/gemini-1.5-flash:generateContent`,
       {
         method: "POST",
-        headers: { "Content-Type": "application/json" },
+        headers: { "Content-Type": "application/json", "x-goog-api-key": env.GEMINI_API_KEY },
         body: JSON.stringify({
           contents: [{ parts: [{ text: prompt }] }],
           generationConfig: {
@@ -938,6 +938,15 @@ async function logCronRun(
     updatedAt: Timestamp.now()
   });
 }
+
+process.on("unhandledRejection", (reason) => {
+  console.error("[unhandledRejection]", reason);
+});
+
+app.use((err: Error, _req: Request, res: Response, _next) => {
+  console.error("[express] Unhandled error:", err.message);
+  sendError(res, 500, "Internal server error");
+});
 
 if (!process.env.VERCEL) {
   app.listen(env.PORT, () => {

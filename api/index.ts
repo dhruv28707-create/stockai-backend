@@ -19,6 +19,8 @@ import {
 } from "../services/angelone";
 import { getBatch, BATCH_SIZE, TOTAL_BATCHES, TOTAL_STOCKS } from "../config/stocks";
 import { sendError, sendSuccess } from "../utils/response";
+import { getErrorMessage, getErrorCode } from "../utils/helpers";
+import { analyzeWithAI } from "../services/ai";
 
 const app = express();
 
@@ -171,20 +173,6 @@ const registerDeviceHandler = async (req: Request, res: Response) => {
 
 app.get("/api/notifications/register", registerDeviceHandler);
 app.post("/api/notifications/register", registerDeviceHandler);
-app.get("/api/register-device", registerDeviceHandler);
-app.post("/api/register-device", registerDeviceHandler);
-app.post("/api/device/register", registerDeviceHandler);
-app.post("/api/fcm/register", registerDeviceHandler);
-app.get("/api/device/register", registerDeviceHandler);
-app.get("/api/fcm/register", registerDeviceHandler);
-app.post("/api/api/notifications/register", registerDeviceHandler);
-app.post("/api/api/register-device", registerDeviceHandler);
-app.post("/notifications/register", registerDeviceHandler);
-app.post("/register-device", registerDeviceHandler);
-app.get("/api/api/notifications/register", registerDeviceHandler);
-app.get("/api/api/register-device", registerDeviceHandler);
-app.get("/notifications/register", registerDeviceHandler);
-app.get("/register-device", registerDeviceHandler);
 
 const notificationStatusHandler = async (_req: Request, res: Response) => {
   try {
@@ -211,9 +199,6 @@ const notificationStatusHandler = async (_req: Request, res: Response) => {
 };
 
 app.get("/api/notifications/status", notificationStatusHandler);
-app.get("/api/notifications/debug", notificationStatusHandler);
-app.get("/api/api/notifications/status", notificationStatusHandler);
-app.get("/notifications/status", notificationStatusHandler);
 
 const testNotificationHandler = async (req: Request, res: Response) => {
   try {
@@ -257,16 +242,6 @@ const testNotificationHandler = async (req: Request, res: Response) => {
 
 app.get("/api/notifications/test", testNotificationHandler);
 app.post("/api/notifications/test", testNotificationHandler);
-app.get("/api/notifications/test-send", testNotificationHandler);
-app.post("/api/notifications/test-send", testNotificationHandler);
-app.get("/api/test-notification", testNotificationHandler);
-app.post("/api/test-notification", testNotificationHandler);
-app.get("/api/send-test-notification", testNotificationHandler);
-app.post("/api/send-test-notification", testNotificationHandler);
-app.get("/api/api/notifications/test", testNotificationHandler);
-app.post("/api/api/notifications/test", testNotificationHandler);
-app.get("/notifications/test", testNotificationHandler);
-app.post("/notifications/test", testNotificationHandler);
 
 app.get("/api/notifications", async (req: Request, res: Response) => {
   try {
@@ -291,34 +266,6 @@ app.get("/api/notifications", async (req: Request, res: Response) => {
 // ─── Capital & Monthly Setup ──────────────────────────────────────────────────
 
 app.get("/api/capital/current", async (_req: Request, res: Response) => {
-  try {
-    sendSuccess(res, toCapitalSetupResponse(await getCurrentMonthlySetup()));
-  } catch {
-    sendError(res, 500, "Failed to fetch monthly capital");
-  }
-});
-app.get("/api/capital", async (_req: Request, res: Response) => {
-  try {
-    sendSuccess(res, toCapitalSetupResponse(await getCurrentMonthlySetup()));
-  } catch {
-    sendError(res, 500, "Failed to fetch monthly capital");
-  }
-});
-app.get("/capital/current", async (_req: Request, res: Response) => {
-  try {
-    sendSuccess(res, toCapitalSetupResponse(await getCurrentMonthlySetup()));
-  } catch {
-    sendError(res, 500, "Failed to fetch monthly capital");
-  }
-});
-app.get("/api/month/current", async (_req: Request, res: Response) => {
-  try {
-    sendSuccess(res, toCapitalSetupResponse(await getCurrentMonthlySetup()));
-  } catch {
-    sendError(res, 500, "Failed to fetch monthly capital");
-  }
-});
-app.get("/api/monthly/setup", async (_req: Request, res: Response) => {
   try {
     sendSuccess(res, toCapitalSetupResponse(await getCurrentMonthlySetup()));
   } catch {
@@ -377,13 +324,6 @@ const saveCapitalSetupHandler = async (req: Request, res: Response) => {
 };
 
 app.post("/api/capital/budget", saveCapitalSetupHandler);
-app.post("/api/month/start", saveCapitalSetupHandler);
-app.post("/api/monthly/setup", saveCapitalSetupHandler);
-app.post("/api/month/setup", saveCapitalSetupHandler);
-app.post("/api/api/capital/budget", saveCapitalSetupHandler);
-app.post("/api/api/month/start", saveCapitalSetupHandler);
-app.post("/capital/budget", saveCapitalSetupHandler);
-app.post("/month/start", saveCapitalSetupHandler);
 
 app.post("/api/capital/profit", async (req: Request, res: Response) => {
   try {
@@ -665,112 +605,6 @@ async function runSellScan(batchIndex: number): Promise<void> {
   await logCronRun("sell_scan", batchIndex, "completed");
 }
 
-// ─── AI Analysis ─────────────────────────────────────────────────────────────
-
-interface Candidate {
-  symbol: string;
-  name: string;
-  sector: string;
-  price: number;
-  change: number;
-  changePercent: number;
-  volume: number;
-  high: number;
-  low: number;
-}
-
-interface AIPick {
-  symbol: string;
-  name: string;
-  sector: string;
-  price: number;
-  changePercent: number;
-  reason: string;
-  confidence: "HIGH" | "MEDIUM" | "LOW";
-}
-
-async function analyzeWithAI(
-  candidates: Candidate[],
-  type: "buy" | "sell"
-): Promise<AIPick | null> {
-  const prompt = `You are a stock market analyst for NSE (India). Analyze these ${type === "buy" ? "bullish" : "bearish"} stock candidates and pick the SINGLE best ${type} opportunity. Reply ONLY with valid JSON, no markdown, no explanation.
-
-Candidates:
-${JSON.stringify(candidates, null, 2)}
-
-Return this exact JSON shape:
-{
-  "symbol": "STOCK_SYMBOL",
-  "name": "Stock Name",
-  "sector": "Sector",
-  "price": 0,
-  "changePercent": 0,
-  "reason": "One sentence explanation under 20 words",
-  "confidence": "HIGH" | "MEDIUM" | "LOW"
-}
-
-If none of these stocks show a genuinely strong ${type} signal, return: null`;
-
-  if (!env.GEMINI_API_KEY) {
-    // No AI key at all — fall back to top mover
-    const top = candidates[0];
-    return {
-      symbol: top.symbol,
-      name: top.name,
-      sector: top.sector,
-      price: top.price,
-      changePercent: top.changePercent,
-      reason: `Strong upward momentum of ${top.changePercent.toFixed(2)}%`,
-      confidence: "MEDIUM"
-    };
-  }
-
-  try {
-    const response = await fetch(
-      `https://generativelanguage.googleapis.com/v1beta/models/gemini-1.5-flash:generateContent`,
-      {
-        method: "POST",
-        headers: { "Content-Type": "application/json", "x-goog-api-key": env.GEMINI_API_KEY },
-        body: JSON.stringify({
-          contents: [{ parts: [{ text: prompt }] }],
-          generationConfig: {
-            temperature: 0.2,
-            maxOutputTokens: 300
-          }
-        })
-      }
-    );
-
-    const data = (await response.json()) as {
-      candidates: Array<{
-        content: { parts: Array<{ text: string }> };
-      }>;
-    };
-
-    const text = data.candidates?.[0]?.content?.parts?.[0]?.text?.trim() ?? "";
-
-    // Strip any markdown fences Gemini might add
-    const clean = text.replace(/```json|```/g, "").trim();
-
-    if (clean === "null" || clean === "") return null;
-
-    return JSON.parse(clean) as AIPick;
-  } catch (err) {
-    console.error("[analyzeWithAI] Gemini failed:", getErrorMessage(err));
-    // Fallback: top candidate without AI reasoning
-    const top = candidates[0];
-    return {
-      symbol: top.symbol,
-      name: top.name,
-      sector: top.sector,
-      price: top.price,
-      changePercent: top.changePercent,
-      reason: `Strong momentum: up ${top.changePercent.toFixed(2)}% today`,
-      confidence: "LOW"
-    };
-  }
-}
-
 // ─── Helpers ──────────────────────────────────────────────────────────────────
 
 function getCurrentMonth(): string {
@@ -893,22 +727,6 @@ function getNotificationFailureMessage(
     return "No FCM token is saved. The frontend must register the Android FCM token first.";
   }
   return error ?? "FCM rejected the test notification.";
-}
-
-function getErrorMessage(error: unknown): string {
-  return error instanceof Error ? error.message : String(error);
-}
-
-function getErrorCode(error: unknown): string | undefined {
-  if (
-    typeof error === "object" &&
-    error !== null &&
-    "code" in error &&
-    typeof error.code === "string"
-  ) {
-    return error.code;
-  }
-  return undefined;
 }
 
 function isAuthorizedCronRequest(req: Request): boolean {

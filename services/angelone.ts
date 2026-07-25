@@ -1,5 +1,6 @@
 import { createHmac } from "node:crypto";
 import { env } from "../config/env";
+import { logger } from "../utils/logger";
 import {
   getAngelSymbols,
   getStockSymbols,
@@ -301,7 +302,7 @@ export async function getAngelOneMarketSummary(batchNumber?: number): Promise<{
   } catch (err) {
     const msg = err instanceof Error ? err.message : String(err);
     // Angel One returns errors like "Market is closed" or session errors outside hours
-    console.warn("[angelone] getQuotes failed:", msg);
+    logger.warn("[angelone] getQuotes failed", { error: msg });
     return closedResponse(msg);
   }
 

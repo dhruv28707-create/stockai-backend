@@ -21,6 +21,8 @@ import { getBatch, BATCH_SIZE, TOTAL_BATCHES, TOTAL_STOCKS } from "../config/sto
 import { sendError, sendSuccess } from "../utils/response";
 import { getErrorMessage, getErrorCode } from "../utils/helpers";
 import { analyzeWithAI } from "../services/ai";
+import { logger, toErrorContext } from "../utils/logger";
+import rateLimit from "express-rate-limit";
 
 const app = express();
 
@@ -32,6 +34,15 @@ app.use(
   })
 );
 app.use(express.json());
+
+const limiter = rateLimit({
+  windowMs: 60 * 1000,
+  max: 100,
+  standardHeaders: true,
+  legacyHeaders: false,
+  skip: (req) => req.path.startsWith("/api/cron/")
+});
+app.use(limiter);
 
 // ─── Health & Info ────────────────────────────────────────────────────────────
 
@@ -387,7 +398,7 @@ app.get("/api/cron/scan", async (req: Request, res: Response) => {
 
   // Kick off the real work after responding
   runBuyScan(batchIndex, stocks).catch((err) => {
-    console.error(`[buy_scan] batch ${batchIndex} failed:`, err);
+    logger.error(`[buy_scan] batch ${batchIndex} failed`, toErrorContext(err));
   });
 });
 
@@ -413,7 +424,7 @@ app.get("/api/cron/check-positions", async (req: Request, res: Response) => {
   });
 
   runSellScan(batchIndex).catch((err) => {
-    console.error(`[sell_scan] batch ${batchIndex} failed:`, err);
+    logger.error(`[sell_scan] batch ${batchIndex} failed`, toErrorContext(err));
   });
 });
 
@@ -758,17 +769,17 @@ async function logCronRun(
 }
 
 process.on("unhandledRejection", (reason) => {
-  console.error("[unhandledRejection]", reason);
+  logger.error("[unhandledRejection]", toErrorContext(reason));
 });
 
 app.use((err: Error, _req: Request, res: Response, _next) => {
-  console.error("[express] Unhandled error:", err.message);
+  logger.error("[express] Unhandled error", { error: err.message });
   sendError(res, 500, "Internal server error");
 });
 
 if (!process.env.VERCEL) {
   app.listen(env.PORT, () => {
-    console.log(`StockAI backend listening on http://localhost:${env.PORT}`);
+    logger.info(`StockAI backend listening on http://localhost:${env.PORT}`);
   });
 }
 

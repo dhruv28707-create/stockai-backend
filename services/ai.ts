@@ -1,5 +1,6 @@
 import { env } from "../config/env";
 import { getErrorMessage } from "../utils/helpers";
+import { logger } from "../utils/logger";
 
 export interface Candidate {
   symbol: string;
@@ -88,7 +89,7 @@ If none of these stocks show a genuinely strong ${type} signal, return: null`;
 
     return JSON.parse(clean) as AIPick;
   } catch (err) {
-    console.error("[analyzeWithAI] Gemini failed:", getErrorMessage(err));
+    logger.error("[analyzeWithAI] Gemini failed", { error: getErrorMessage(err) });
     const top = candidates[0];
     return {
       symbol: top.symbol,

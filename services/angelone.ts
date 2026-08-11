@@ -10,6 +10,23 @@ import {
 
 const BASE_URL = "https://apiconnect.angelbroking.com";
 
+const LOGIN_TIMEOUT_MS = 15_000;
+const QUOTE_TIMEOUT_MS = 25_000;
+
+async function fetchWithTimeout(
+  url: string,
+  options: RequestInit,
+  timeoutMs: number
+): Promise<Response> {
+  const controller = new AbortController();
+  const timer = setTimeout(() => controller.abort(), timeoutMs);
+  try {
+    return await fetch(url, { ...options, signal: controller.signal });
+  } finally {
+    clearTimeout(timer);
+  }
+}
+
 interface AngelOneTokens {
   authToken: string;
   refreshToken: string;
@@ -106,21 +123,32 @@ export async function login(): Promise<AngelOneTokens> {
     return tokenCache.tokens;
   }
 
-  if (!env.ANGEL_ONE_TOTP_SECRET || !env.ANGEL_ONE_API_KEY || !env.ANGEL_ONE_CLIENT_ID || !env.ANGEL_ONE_MPIN) {
-    throw new Error("Angel One is not fully configured. Set ANGEL_ONE_* environment variables.");
+  if (
+    !env.ANGEL_ONE_TOTP_SECRET ||
+    !env.ANGEL_ONE_API_KEY ||
+    !env.ANGEL_ONE_CLIENT_ID ||
+    !env.ANGEL_ONE_MPIN
+  ) {
+    throw new Error(
+      "Angel One is not fully configured. Set ANGEL_ONE_* environment variables."
+    );
   }
 
   const totp = generateTotp(env.ANGEL_ONE_TOTP_SECRET);
 
-  const response = await fetch(`${BASE_URL}/rest/auth/angelbroking/user/login/v1`, {
-    method: "POST",
-    headers: buildHeaders(env.ANGEL_ONE_API_KEY),
-    body: JSON.stringify({
-      clientcode: env.ANGEL_ONE_CLIENT_ID,
-      password: env.ANGEL_ONE_MPIN,
-      totp
-    })
-  });
+  const response = await fetchWithTimeout(
+    `${BASE_URL}/rest/auth/angelbroking/user/login/v1`,
+    {
+      method: "POST",
+      headers: buildHeaders(env.ANGEL_ONE_API_KEY),
+      body: JSON.stringify({
+        clientcode: env.ANGEL_ONE_CLIENT_ID,
+        password: env.ANGEL_ONE_MPIN,
+        totp
+      })
+    },
+    LOGIN_TIMEOUT_MS
+  );
 
   const loginText = await response.text();
 
@@ -205,14 +233,18 @@ export async function getQuotes(
     ...getAngelSymbols(batchNumber)
   ];
 
-  const response = await fetch(`${BASE_URL}/rest/secure/angelbroking/market/v1/quote`, {
-    method: "POST",
-    headers: buildHeaders(env.ANGEL_ONE_API_KEY, tokens.authToken),
-    body: JSON.stringify({
-      mode: "FULL",
-      tradingSymbols: symbols.map((s) => `NSE:${s.toUpperCase()}`)
-    })
-  });
+  const response = await fetchWithTimeout(
+    `${BASE_URL}/rest/secure/angelbroking/market/v1/quote`,
+    {
+      method: "POST",
+      headers: buildHeaders(env.ANGEL_ONE_API_KEY, tokens.authToken),
+      body: JSON.stringify({
+        mode: "FULL",
+        tradingSymbols: symbols.map((s) => `NSE:${s.toUpperCase()}`)
+      })
+    },
+    QUOTE_TIMEOUT_MS
+  );
 
   const text = await response.text();
   let json: AngelOneQuoteResponse;

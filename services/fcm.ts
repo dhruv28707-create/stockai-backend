@@ -3,8 +3,17 @@ import { env } from "../config/env";
 import { getDb, getFcm } from "../firebase/admin";
 import { collectionNames } from "../models";
 import { getErrorCode } from "../utils/helpers";
+import { logger } from "../utils/logger";
 
 const TOKEN_DOC_ID = "fcm_device_token";
+
+// These mean the stored token is dead and will never deliver again.
+// (deliberately token-specific — "messaging/invalid-argument" is too broad
+// and can be raised by unrelated payload problems)
+const INVALID_TOKEN_ERROR_CODES = [
+  "messaging/registration-token-not-registered",
+  "messaging/invalid-registration-token"
+];
 
 export interface PushMetadata {
   type: string;
@@ -149,6 +158,14 @@ export async function sendPushNotification(
     const errorMessage = error instanceof Error ? error.message : String(error);
     const errorCode = getErrorCode(error);
 
+    // If the token is permanently invalid, delete it so the frontend's
+    // next notification-status check sees "no token" and re-registers.
+    // Only clears when the failing token is the one stored in Firestore — an
+    // env-configured token can't be rotated from here.
+    if (errorCode && INVALID_TOKEN_ERROR_CODES.includes(errorCode)) {
+      await clearInvalidDeviceToken(token);
+    }
+
     await logNotification({
       userId: env.SINGLE_USER_ID,
       title,
@@ -168,6 +185,19 @@ export async function sendPushNotification(
       hasToken: true,
       error: errorCode ? `${errorCode}: ${errorMessage}` : errorMessage
     };
+  }
+}
+
+async function clearInvalidDeviceToken(token: string): Promise<void> {
+  try {
+    const ref = getDb().collection(collectionNames.settings).doc(TOKEN_DOC_ID);
+    const snap = await ref.get();
+    if (snap.data()?.token === token) {
+      await ref.delete();
+      logger.warn("[fcm] Cleared invalid device token; app must re-register.");
+    }
+  } catch {
+    // Best-effort cleanup.
   }
 }
 
@@ -195,5 +225,3 @@ function getNotificationChannel(type: string): { channelId: string; sound: strin
 
   return { channelId: "buy_signals", sound: "buy_signal" };
 }
-
-

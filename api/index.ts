@@ -15,12 +15,19 @@ import { getMarketSummary } from "../services/marketData";
 import {
   getAngelOneMarketSummary,
   getQuotes,
-  isAngelOneConfigured
+  isAngelOneConfigured,
+  type AngelOneQuoteData
 } from "../services/angelone";
-import { getBatch, BATCH_SIZE, TOTAL_BATCHES, TOTAL_STOCKS, type StockInfo } from "../config/stocks";
+import {
+  getBatch,
+  BATCH_SIZE,
+  TOTAL_BATCHES,
+  TOTAL_STOCKS,
+  type StockInfo
+} from "../config/stocks";
 import { sendError, sendSuccess } from "../utils/response";
 import { getErrorMessage, getErrorCode } from "../utils/helpers";
-import { analyzeWithAI } from "../services/ai";
+import { analyzeWithAI, type Candidate } from "../services/ai";
 import { logger, toErrorContext } from "../utils/logger";
 import rateLimit from "express-rate-limit";
 
@@ -374,14 +381,15 @@ app.post("/api/capital/profit", async (req: Request, res: Response) => {
   }
 });
 
-// ─── Cron: Buy Scan (called by cron-job.org, one batch per call) ──────────────
+// ─── Cron: Buy Scan ────────────────────────────────────────────────────────────
 //
-// cron-job.org hits these URLs on schedule:
-//   12:00 → /api/cron/scan?batch=1
-//   12:05 → /api/cron/scan?batch=2
-//   12:10 → /api/cron/scan?batch=3
-//   12:15 → /api/cron/scan?batch=4
-//   12:20 → /api/cron/scan?batch=5
+// vercel.json schedules a single daily run that scans every batch:
+//   12:00 IST → /api/cron/scan  (no batch param → batch=all)
+// Manual / external cron use:
+//   12:00 IST → /api/cron/scan?batch=1 … /api/cron/scan?batch=5
+//
+// The scan is awaited before responding — background work after res.json() is
+// not guaranteed to finish on Vercel.
 
 app.get("/api/cron/scan", async (req: Request, res: Response) => {
   if (!isAuthorizedCronRequest(req)) {
@@ -389,26 +397,51 @@ app.get("/api/cron/scan", async (req: Request, res: Response) => {
     return;
   }
 
-  const batchParam = toPositiveNumber(req.query.batch, 1);
-  const batchIndex = Math.min(Math.max(batchParam, 1), TOTAL_BATCHES);
+  const batchParam = String(req.query.batch ?? "").toLowerCase();
+  // No batch param (e.g. the vercel.json cron) or batch=all → scan everything.
+  // External cron-job.org setups pass an explicit batch=N and still work.
+  const isAll = !batchParam || batchParam === "all" || batchParam === "0";
+
+  // IMPORTANT: we await the scan before responding. On Vercel, async work
+  // started after res.json() is not guaranteed to complete (the function is
+  // frozen once the response is sent), which silently killed every scan.
+  if (isAll) {
+    try {
+      const results = await runBuyScanAll();
+      res.status(200).json({
+        status: "completed",
+        job: "buy_scan",
+        batch: "all",
+        totalBatches: TOTAL_BATCHES,
+        results
+      });
+    } catch (err) {
+      logger.error("[buy_scan] scan-all failed", toErrorContext(err));
+      sendError(res, 500, `Buy scan failed: ${getErrorMessage(err)}`);
+    }
+    return;
+  }
+
+  const batchIndex = Math.min(
+    Math.max(toPositiveNumber(req.query.batch, 1), 1),
+    TOTAL_BATCHES
+  );
   const stocks = getBatch(batchIndex);
 
-  // Respond immediately so Vercel doesn't time out waiting for us.
-  // The actual scan runs after this line — Vercel keeps the function alive
-  // until the async work resolves (or hits maxDuration: 60 in vercel.json).
-  res.status(200).json({
-    status: "accepted",
-    job: "buy_scan",
-    batch: batchIndex,
-    totalBatches: TOTAL_BATCHES,
-    stockCount: stocks.length,
-    stocks: stocks.map((s) => s.symbol)
-  });
-
-  // Kick off the real work after responding
-  runBuyScan(batchIndex, stocks).catch((err) => {
+  try {
+    const result = await runBuyScan(batchIndex, stocks);
+    res.status(200).json({
+      status: "completed",
+      job: "buy_scan",
+      batch: batchIndex,
+      totalBatches: TOTAL_BATCHES,
+      stockCount: stocks.length,
+      result
+    });
+  } catch (err) {
     logger.error(`[buy_scan] batch ${batchIndex} failed`, toErrorContext(err));
-  });
+    sendError(res, 500, `Buy scan failed: ${getErrorMessage(err)}`);
+  }
 });
 
 // ─── Cron: Sell / Position Check ─────────────────────────────────────────────
@@ -419,22 +452,23 @@ app.get("/api/cron/check-positions", async (req: Request, res: Response) => {
     return;
   }
 
-  const batchParam = toPositiveNumber(req.query.batch, 1);
-  const batchIndex = Math.min(Math.max(batchParam, 1), TOTAL_BATCHES);
-  const stocks = getBatch(batchIndex);
+  const batchIndex = Math.min(
+    Math.max(toPositiveNumber(req.query.batch, 1), 1),
+    TOTAL_BATCHES
+  );
 
-  res.status(200).json({
-    status: "accepted",
-    job: "sell_scan",
-    batch: batchIndex,
-    totalBatches: TOTAL_BATCHES,
-    stockCount: stocks.length,
-    stocks: stocks.map((s) => s.symbol)
-  });
-
-  runSellScan(batchIndex).catch((err) => {
+  try {
+    const result = await runSellScan(batchIndex);
+    res.status(200).json({
+      status: "completed",
+      job: "sell_scan",
+      batch: batchIndex,
+      result
+    });
+  } catch (err) {
     logger.error(`[sell_scan] batch ${batchIndex} failed`, toErrorContext(err));
-  });
+    sendError(res, 500, `Sell scan failed: ${getErrorMessage(err)}`);
+  }
 });
 
 // ─── Stocks Universe ──────────────────────────────────────────────────────────
@@ -449,45 +483,43 @@ app.get("/api/stocks/universe", async (_req: Request, res: Response) => {
 
 // ─── Buy Scan Logic ───────────────────────────────────────────────────────────
 
-async function runBuyScan(batchIndex: number, stocks: StockInfo[]): Promise<void> {
-  await logCronRun("buy_scan", batchIndex, "running");
+type QuoteMap = Record<string, AngelOneQuoteData>;
 
-  if (!isAngelOneConfigured()) {
-    await logCronRun("buy_scan", batchIndex, "skipped", "Angel One not configured");
-    return;
-  }
+interface BuyScanResult {
+  status: "completed" | "failed" | "skipped" | "no_candidates";
+  message?: string;
+  notified?: string | null;
+  pushSent?: boolean;
+  pushError?: string;
+}
 
-  let quotes: Record<
-    string,
-    {
-      ltp: number;
-      dayChange: number;
-      dayChangePercentage: number;
-      volume: number;
-      high: number;
-      low: number;
-      open: number;
-      close: number;
-    }
-  >;
+interface SellScanResult {
+  status: "completed" | "failed" | "skipped";
+  message?: string;
+  alertsSent: number;
+}
 
-  try {
-    quotes = (await getQuotes(batchIndex)) as typeof quotes;
-  } catch (err) {
-    await logCronRun("buy_scan", batchIndex, "failed", getErrorMessage(err));
-    return;
-  }
+// Same-day dedup (in-memory; persists on warm instances, resets on cold start).
+const notifiedKeys = new Set<string>();
 
-  // Find stocks showing strong upward movement
-  const candidates = stocks
-    .filter((s) => {
-      const q = quotes[s.symbol];
-      if (!q) return false;
-      // Criteria: up >1.5% on the day with decent volume
-      return q.dayChangePercentage >= 1.5 && q.volume > 50_000;
-    })
+function getISTDateKey(): string {
+  return new Intl.DateTimeFormat("en-CA", {
+    timeZone: "Asia/Kolkata",
+    year: "numeric",
+    month: "2-digit",
+    day: "2-digit"
+  }).format(new Date());
+}
+
+function pruneNotifiedKeys(): void {
+  if (notifiedKeys.size > 1000) notifiedKeys.clear();
+}
+
+function buildBuyCandidates(stocks: StockInfo[], quotes: QuoteMap): Candidate[] {
+  const withQuote = stocks
     .map((s) => {
       const q = quotes[s.symbol];
+      if (!q) return null;
       return {
         symbol: s.symbol,
         name: s.name,
@@ -500,19 +532,80 @@ async function runBuyScan(batchIndex: number, stocks: StockInfo[]): Promise<void
         low: q.low
       };
     })
+    .filter((c): c is Candidate => c !== null);
+
+  const minChange = env.BUY_SCAN_MIN_CHANGE_PERCENT;
+  const minVolume = env.BUY_SCAN_MIN_VOLUME;
+
+  let candidates = withQuote
+    .filter((c) => c.changePercent >= minChange && c.volume >= minVolume)
     .sort((a, b) => b.changePercent - a.changePercent);
+
+  // If the strict filter finds too little today, widen to the top gainers so
+  // the AI still has candidates to evaluate — signals should fire on most days.
+  if (candidates.length < 2) {
+    const widened = withQuote
+      .filter(
+        (c) =>
+          c.changePercent > 0 && c.volume >= Math.max(10_000, Math.floor(minVolume / 2))
+      )
+      .sort((a, b) => b.changePercent - a.changePercent)
+      .slice(0, 8);
+    if (widened.length > 0) candidates = widened;
+  }
+
+  return candidates;
+}
+
+async function runBuyScan(
+  batchIndex: number,
+  stocks: StockInfo[],
+  quotes?: QuoteMap
+): Promise<BuyScanResult> {
+  pruneNotifiedKeys();
+  await logCronRun("buy_scan", batchIndex, "running");
+
+  if (!isAngelOneConfigured()) {
+    await logCronRun("buy_scan", batchIndex, "skipped", "Angel One not configured");
+    return { status: "skipped", message: "Angel One not configured" };
+  }
+
+  let quoteMap = quotes;
+  if (!quoteMap) {
+    try {
+      quoteMap = await getQuotes(batchIndex);
+    } catch (err) {
+      const message = getErrorMessage(err);
+      await logCronRun("buy_scan", batchIndex, "failed", message);
+      return { status: "failed", message };
+    }
+  }
+
+  const candidates = buildBuyCandidates(stocks, quoteMap);
 
   if (candidates.length === 0) {
     await logCronRun("buy_scan", batchIndex, "completed", "No candidates found");
-    return;
+    return { status: "no_candidates", message: "No candidates found" };
   }
 
   // Use AI to pick the best opportunity from this batch's candidates
-  const aiPick = await analyzeWithAI(candidates, "buy");
+  const aiPick = await analyzeWithAI(candidates.slice(0, 10), "buy");
 
   if (!aiPick) {
     await logCronRun("buy_scan", batchIndex, "completed", "AI found no strong signal");
-    return;
+    return { status: "completed", message: "AI found no strong signal" };
+  }
+
+  // Same-day dedup: never notify the same symbol twice in one IST day.
+  const dedupKey = `BUY:${aiPick.symbol}:${getISTDateKey()}`;
+  if (notifiedKeys.has(dedupKey)) {
+    await logCronRun(
+      "buy_scan",
+      batchIndex,
+      "completed",
+      `Already notified ${aiPick.symbol} today`
+    );
+    return { status: "completed", message: `Already notified ${aiPick.symbol} today` };
   }
 
   // Save recommendation to Firestore
@@ -537,7 +630,7 @@ async function runBuyScan(batchIndex: number, stocks: StockInfo[]): Promise<void
   });
 
   // Send push notification
-  await sendPushNotification(
+  const push = await sendPushNotification(
     `📈 Buy Signal: ${aiPick.symbol}`,
     `${aiPick.name} is up ${aiPick.changePercent.toFixed(2)}% — ${aiPick.reason}`,
     "BUY_ALERT",
@@ -545,12 +638,64 @@ async function runBuyScan(batchIndex: number, stocks: StockInfo[]): Promise<void
     aiPick.symbol
   );
 
-  await logCronRun("buy_scan", batchIndex, "completed", `Notified: ${aiPick.symbol}`);
+  // Only mark as notified once the push actually went out — a failed push
+  // stays eligible for retry on the next scan.
+  if (push.sent) {
+    notifiedKeys.add(dedupKey);
+  }
+
+  const message = push.sent
+    ? `Notified: ${aiPick.symbol}`
+    : `Saved ${aiPick.symbol} but push failed: ${push.error ?? "unknown error"}`;
+  await logCronRun("buy_scan", batchIndex, "completed", message);
+
+  return {
+    status: "completed",
+    message,
+    notified: aiPick.symbol,
+    pushSent: push.sent,
+    pushError: push.error
+  };
+}
+
+async function runBuyScanAll(): Promise<BuyScanResult[]> {
+  pruneNotifiedKeys();
+
+  // Fetch quotes for the whole universe in ONE request (well within Angel
+  // One's 500-symbol quote limit) — keeps us safely under Vercel's 60s cap.
+  let allQuotes: QuoteMap;
+  try {
+    allQuotes = await getQuotes();
+  } catch (err) {
+    const message = getErrorMessage(err);
+    await logCronRun("buy_scan", 0, "failed", message);
+    return [{ status: "failed", message }];
+  }
+
+  // AI analysis is the slow part — run the batches in parallel.
+  const pending: Promise<BuyScanResult>[] = [];
+  for (let batch = 1; batch <= TOTAL_BATCHES; batch++) {
+    const batchStocks = getBatch(batch);
+    const batchQuotes: QuoteMap = {};
+    for (const s of batchStocks) {
+      if (allQuotes[s.symbol]) batchQuotes[s.symbol] = allQuotes[s.symbol];
+    }
+    if (Object.keys(batchQuotes).length === 0) {
+      const message = `No quotes returned for batch ${batch}`;
+      await logCronRun("buy_scan", batch, "failed", message);
+      pending.push(Promise.resolve({ status: "failed", message }));
+      continue;
+    }
+    pending.push(runBuyScan(batch, batchStocks, batchQuotes));
+  }
+
+  return Promise.all(pending);
 }
 
 // ─── Sell Scan Logic ──────────────────────────────────────────────────────────
 
-async function runSellScan(batchIndex: number): Promise<void> {
+async function runSellScan(batchIndex: number): Promise<SellScanResult> {
+  pruneNotifiedKeys();
   await logCronRun("sell_scan", batchIndex, "running");
 
   // Fetch open positions from Firestore
@@ -562,27 +707,28 @@ async function runSellScan(batchIndex: number): Promise<void> {
 
   if (positionsSnap.empty) {
     await logCronRun("sell_scan", batchIndex, "completed", "No open positions");
-    return;
+    return { status: "completed", message: "No open positions", alertsSent: 0 };
   }
 
   if (!isAngelOneConfigured()) {
     await logCronRun("sell_scan", batchIndex, "skipped", "Angel One not configured");
-    return;
+    return { status: "skipped", message: "Angel One not configured", alertsSent: 0 };
   }
 
   const positions = positionsSnap.docs.map((doc) => normalizeDoc(doc.id, doc.data()));
 
-  let quotes: Record<
-    string,
-    { ltp: number; dayChange: number; dayChangePercentage: number; volume: number }
-  >;
+  let quotes: QuoteMap;
   try {
     // Fetch quotes for all batches to cover all open positions
-    quotes = (await getQuotes()) as typeof quotes;
+    quotes = await getQuotes();
   } catch (err) {
-    await logCronRun("sell_scan", batchIndex, "failed", getErrorMessage(err));
-    return;
+    const message = getErrorMessage(err);
+    await logCronRun("sell_scan", batchIndex, "failed", message);
+    return { status: "failed", message, alertsSent: 0 };
   }
+
+  const dayKey = getISTDateKey();
+  let alertsSent = 0;
 
   for (const position of positions) {
     const symbol = String(position.symbol ?? "");
@@ -596,27 +742,36 @@ async function runSellScan(batchIndex: number): Promise<void> {
 
     // Alert if down more than 3% from entry (stop-loss zone)
     if (pnlPercent <= -3) {
-      await sendPushNotification(
+      const dedupKey = `SL:${symbol}:${dayKey}`;
+      if (notifiedKeys.has(dedupKey)) continue;
+      const push = await sendPushNotification(
         `🔴 Stop-Loss Alert: ${symbol}`,
         `${symbol} is down ${Math.abs(pnlPercent).toFixed(2)}% from your entry of ₹${entryPrice}. Consider exiting.`,
         "STOP_LOSS_ALERT",
         "HIGH",
         symbol
       );
+      if (push.sent) notifiedKeys.add(dedupKey);
+      alertsSent++;
     }
     // Alert if up more than 5% from entry (take-profit zone)
     else if (pnlPercent >= 5) {
-      await sendPushNotification(
+      const dedupKey = `TP:${symbol}:${dayKey}`;
+      if (notifiedKeys.has(dedupKey)) continue;
+      const push = await sendPushNotification(
         `🟢 Profit Target: ${symbol}`,
         `${symbol} is up ${pnlPercent.toFixed(2)}% from your entry of ₹${entryPrice}. Consider booking profits.`,
         "SELL_ALERT",
         "HIGH",
         symbol
       );
+      if (push.sent) notifiedKeys.add(dedupKey);
+      alertsSent++;
     }
   }
 
   await logCronRun("sell_scan", batchIndex, "completed");
+  return { status: "completed", alertsSent };
 }
 
 // ─── Helpers ──────────────────────────────────────────────────────────────────

@@ -4,7 +4,10 @@ export const collectionNames = {
   positions: "positions",
   recommendations: "recommendations",
   notifications: "notifications",
-  monthlySetup: "monthlySetup"
+  monthlySetup: "monthlySetup",
+  // Same-day notification dedup keys + daily scan run-guard markers.
+  // Survives Vercel cold starts (unlike in-memory state).
+  cronState: "cronState"
 } as const;
 
 export type RiskLevel = "low" | "medium" | "high";

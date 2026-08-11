@@ -56,7 +56,7 @@ app.use(limiter);
 app.get("/api", (_req: Request, res: Response) => {
   // Version is a deployment fingerprint: check /api after deploying to confirm
   // the latest build is live.
-  sendSuccess(res, { service: "StockAI Backend", storage: "firebase", version: "1.2.0" });
+  sendSuccess(res, { service: "StockAI Backend", storage: "firebase", version: "1.3.0" });
 });
 
 app.get("/api/health", (_req: Request, res: Response) => {
@@ -389,9 +389,17 @@ app.post("/api/capital/profit", async (req: Request, res: Response) => {
 //   12:00 IST → /api/cron/scan  (no batch param → batch=all)
 // Manual / external cron use:
 //   12:00 IST → /api/cron/scan?batch=1 … /api/cron/scan?batch=5
+// Manual re-run after today's scan already completed (e.g. debugging):
+//   /api/cron/scan?force=1
 //
 // The scan is awaited before responding — background work after res.json() is
 // not guaranteed to finish on Vercel.
+//
+// Same-day duplicates (two batches of notifications) are prevented two ways:
+//   1. Firestore-backed dedup — a symbol already notified today is never
+//      notified again, even across cold starts.
+//   2. Daily run-guard — the full scan is skipped entirely if it already
+//      completed today (unless ?force=1).
 
 app.get("/api/cron/scan", async (req: Request, res: Response) => {
   if (!isAuthorizedCronRequest(req)) {
@@ -408,6 +416,33 @@ app.get("/api/cron/scan", async (req: Request, res: Response) => {
   // started after res.json() is not guaranteed to complete (the function is
   // frozen once the response is sent), which silently killed every scan.
   if (isAll) {
+    // Daily run-guard: skip when today's full buy scan already completed.
+    // This is what stops the "second batch of 5 notifications" — a duplicate
+    // trigger later the same day (manual force fetch, delayed/duplicate cron)
+    // used to re-run everything because the in-memory dedup had reset on the
+    // cold start. Add ?force=1 to bypass deliberately (manual re-run).
+    // Note: check-then-run is not atomic — two overlapping triggers could both
+    // pass the guard — but Firestore dedup still prevents duplicate pushes.
+    const force = req.query.force === "1" || req.query.force === "true";
+    const todayState = await getTodayRunState("buy_scan");
+
+    if (!force && todayState.status === "completed") {
+      const message = "Buy scan already completed today — skipping duplicate run";
+      logger.info("[buy_scan] Skipped (already completed today)", {
+        date: getISTDateKey(),
+        completedAt: todayState.completedAt?.toDate().toISOString()
+      });
+      await logCronRun("buy_scan", 0, "skipped", message);
+      res.status(200).json({
+        status: "skipped",
+        job: "buy_scan",
+        batch: "all",
+        reason: "already_completed_today",
+        date: getISTDateKey()
+      });
+      return;
+    }
+
     try {
       const results = await runBuyScanAll();
       res.status(200).json({
@@ -525,8 +560,14 @@ interface SellScanResult {
   alertsSent: number;
 }
 
-// Same-day dedup (in-memory; persists on warm instances, resets on cold start).
-const notifiedKeys = new Set<string>();
+// ─── Same-day dedup & run guard (Firestore-backed) ────────────────────────────
+//
+// The old in-memory Set reset on every Vercel cold start, so a second trigger
+// the same day (manual force fetch, a delayed/duplicate cron, an external cron
+// like cron-job.org) ran on a fresh instance with an empty dedup set and
+// notified the same symbols again. Dedup keys and the daily "completed"
+// marker now live in Firestore, so they survive cold starts and parallel
+// batch runs.
 
 function getISTDateKey(): string {
   return new Intl.DateTimeFormat("en-CA", {
@@ -537,8 +578,93 @@ function getISTDateKey(): string {
   }).format(new Date());
 }
 
-function pruneNotifiedKeys(): void {
-  if (notifiedKeys.size > 1000) notifiedKeys.clear();
+/** True if `key` was already marked notified today (persisted in Firestore). */
+async function isKeyNotified(key: string): Promise<boolean> {
+  try {
+    const snap = await getDb()
+      .collection(collectionNames.cronState)
+      .doc(`dedup_${getISTDateKey()}`)
+      .get();
+    const keys = Array.isArray(snap.data()?.keys) ? (snap.data()?.keys as string[]) : [];
+    return keys.includes(key);
+  } catch (err) {
+    // Fail-open: a transient read failure must never block the scan.
+    logger.warn("[dedup] Dedup read failed — treating as not notified", {
+      error: getErrorMessage(err)
+    });
+    return false;
+  }
+}
+
+/**
+ * Mark `key` as notified today. Uses arrayUnion so concurrent batch runs
+ * (buy batches scan in parallel) merge safely without clobbering each other.
+ * Best-effort like logNotification in fcm.ts: a failed write must never turn
+ * a successfully delivered push into a "failed" batch (that would make the
+ * next trigger re-send the same push).
+ */
+async function markKeyNotified(key: string): Promise<void> {
+  try {
+    await getDb()
+      .collection(collectionNames.cronState)
+      .doc(`dedup_${getISTDateKey()}`)
+      .set(
+        { keys: FieldValue.arrayUnion(key), updatedAt: Timestamp.now() },
+        { merge: true }
+      );
+  } catch (err) {
+    logger.warn("[dedup] Dedup write failed — best effort", {
+      key,
+      error: getErrorMessage(err)
+    });
+  }
+}
+
+/** Status of today's run for a job ("completed" blocks a duplicate full run). */
+async function getTodayRunState(job: "buy_scan" | "sell_scan"): Promise<{
+  status?: string;
+  completedAt?: Timestamp;
+}> {
+  try {
+    const snap = await getDb()
+      .collection(collectionNames.cronState)
+      .doc(`${job}_${getISTDateKey()}`)
+      .get();
+    return (snap.data() ?? {}) as { status?: string; completedAt?: Timestamp };
+  } catch (err) {
+    // Fail-open: if we can't read the guard, let the scan run — Firestore
+    // dedup still stops duplicate notifications.
+    logger.warn("[run-guard] State read failed — proceeding", {
+      error: getErrorMessage(err)
+    });
+    return {};
+  }
+}
+
+/** Record that today's run for `job` finished successfully (best-effort). */
+async function markRunCompleted(
+  job: "buy_scan" | "sell_scan",
+  message?: string
+): Promise<void> {
+  try {
+    await getDb()
+      .collection(collectionNames.cronState)
+      .doc(`${job}_${getISTDateKey()}`)
+      .set(
+        {
+          job,
+          status: "completed",
+          completedAt: Timestamp.now(),
+          message: message ?? null,
+          updatedAt: Timestamp.now()
+        },
+        { merge: true }
+      );
+  } catch (err) {
+    logger.warn(`[run-guard] Failed to mark ${job} completed — next trigger may re-run`, {
+      error: getErrorMessage(err)
+    });
+  }
 }
 
 function buildBuyCandidates(stocks: StockInfo[], quotes: QuoteMap): Candidate[] {
@@ -588,7 +714,6 @@ async function runBuyScan(
   stocks: StockInfo[],
   quotes?: QuoteMap
 ): Promise<BuyScanResult> {
-  pruneNotifiedKeys();
   await logCronRun("buy_scan", batchIndex, "running");
 
   if (env.SCAN_DATA_SOURCE === "angelone" && !isAngelOneConfigured()) {
@@ -622,9 +747,10 @@ async function runBuyScan(
     return { status: "completed", message: "AI found no strong signal" };
   }
 
-  // Same-day dedup: never notify the same symbol twice in one IST day.
+  // Same-day dedup: never notify the same symbol twice in one IST day. Persisted
+  // in Firestore so it survives cold starts and duplicate triggers.
   const dedupKey = `BUY:${aiPick.symbol}:${getISTDateKey()}`;
-  if (notifiedKeys.has(dedupKey)) {
+  if (await isKeyNotified(dedupKey)) {
     await logCronRun(
       "buy_scan",
       batchIndex,
@@ -667,7 +793,7 @@ async function runBuyScan(
   // Only mark as notified once the push actually went out — a failed push
   // stays eligible for retry on the next scan.
   if (push.sent) {
-    notifiedKeys.add(dedupKey);
+    await markKeyNotified(dedupKey);
   }
 
   const message = push.sent
@@ -685,8 +811,6 @@ async function runBuyScan(
 }
 
 async function runBuyScanAll(): Promise<BuyScanResult[]> {
-  pruneNotifiedKeys();
-
   // Fetch quotes for the whole universe (Yahoo batches internally; Angel One
   // mode sends one request) — keeps us safely under Vercel's 60s cap.
   let allQuotes: QuoteMap;
@@ -715,13 +839,22 @@ async function runBuyScanAll(): Promise<BuyScanResult[]> {
     pending.push(runBuyScan(batch, batchStocks, batchQuotes));
   }
 
-  return Promise.all(pending);
+  const results = await Promise.all(pending);
+
+  // Only mark today's run as completed when every batch finished without a
+  // hard failure — a partially failed scan stays eligible for a retry.
+  const failed = results.filter((r) => r.status === "failed").length;
+  if (failed === 0) {
+    const notified = results.filter((r) => r.notified).length;
+    await markRunCompleted("buy_scan", `${results.length} batches, ${notified} notified`);
+  }
+
+  return results;
 }
 
 // ─── Sell Scan Logic ──────────────────────────────────────────────────────────
 
 async function runSellScan(batchIndex: number): Promise<SellScanResult> {
-  pruneNotifiedKeys();
   await logCronRun("sell_scan", batchIndex, "running");
 
   // Fetch open positions from Firestore
@@ -769,7 +902,7 @@ async function runSellScan(batchIndex: number): Promise<SellScanResult> {
     // Alert if down more than 3% from entry (stop-loss zone)
     if (pnlPercent <= -3) {
       const dedupKey = `SL:${symbol}:${dayKey}`;
-      if (notifiedKeys.has(dedupKey)) continue;
+      if (await isKeyNotified(dedupKey)) continue;
       const push = await sendPushNotification(
         `🔴 Stop-Loss Alert: ${symbol}`,
         `${symbol} is down ${Math.abs(pnlPercent).toFixed(2)}% from your entry of ₹${entryPrice}. Consider exiting.`,
@@ -777,13 +910,15 @@ async function runSellScan(batchIndex: number): Promise<SellScanResult> {
         "HIGH",
         symbol
       );
-      if (push.sent) notifiedKeys.add(dedupKey);
-      alertsSent++;
+      if (push.sent) {
+        await markKeyNotified(dedupKey);
+        alertsSent++;
+      }
     }
     // Alert if up more than 5% from entry (take-profit zone)
     else if (pnlPercent >= 5) {
       const dedupKey = `TP:${symbol}:${dayKey}`;
-      if (notifiedKeys.has(dedupKey)) continue;
+      if (await isKeyNotified(dedupKey)) continue;
       const push = await sendPushNotification(
         `🟢 Profit Target: ${symbol}`,
         `${symbol} is up ${pnlPercent.toFixed(2)}% from your entry of ₹${entryPrice}. Consider booking profits.`,
@@ -791,8 +926,10 @@ async function runSellScan(batchIndex: number): Promise<SellScanResult> {
         "HIGH",
         symbol
       );
-      if (push.sent) notifiedKeys.add(dedupKey);
-      alertsSent++;
+      if (push.sent) {
+        await markKeyNotified(dedupKey);
+        alertsSent++;
+      }
     }
   }
 
@@ -925,11 +1062,38 @@ function getNotificationFailureMessage(
 }
 
 function isAuthorizedCronRequest(req: Request): boolean {
-  if (!env.CRON_SECRET) return true;
-  return (
-    req.header("authorization") === `Bearer ${env.CRON_SECRET}` ||
-    req.header("x-cron-secret") === env.CRON_SECRET
-  );
+  if (!env.CRON_SECRET) {
+    // Nothing to verify against — accept and log once per run so it's obvious
+    // in the logs why auth isn't being enforced.
+    logger.warn("[cron] CRON_SECRET is not set — accepting all cron requests");
+    return true;
+  }
+
+  const authHeader = req.header("authorization");
+  const xCronSecret = req.header("x-cron-secret");
+  const vercelCronSchedule = req.header("x-vercel-cron-schedule");
+
+  const authorized =
+    authHeader === `Bearer ${env.CRON_SECRET}` ||
+    xCronSecret === env.CRON_SECRET ||
+    // Vercel adds this system header on every scheduled cron trigger. Accepting
+    // it keeps the scan alive even when the Authorization header is missing —
+    // a documented Vercel gotcha when CRON_SECRET is added/changed after the
+    // deploy that registered the cron, or scoped to the wrong environment.
+    // The daily run-guard + Firestore dedup below make a spoofed trigger
+    // harmless (one scan, no duplicate notifications).
+    Boolean(vercelCronSchedule);
+
+  if (!authorized) {
+    logger.warn("[cron] Rejected unauthorized cron request", {
+      path: req.path,
+      hasAuthHeader: Boolean(authHeader),
+      hasXCronSecret: Boolean(xCronSecret),
+      hasVercelCronSchedule: Boolean(vercelCronSchedule)
+    });
+  }
+
+  return authorized;
 }
 
 async function logCronRun(

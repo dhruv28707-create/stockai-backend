@@ -28,7 +28,7 @@ export interface AIPick {
 // and keep a fallback in case a project can't reach the newest one.
 const FALLBACK_MODEL = "gemini-2.5-flash";
 const AI_TIMEOUT_MS = 20_000;
-const MAX_OUTPUT_TOKENS = 300;
+const MAX_OUTPUT_TOKENS = 500;
 
 async function callGemini(model: string, prompt: string): Promise<string> {
   const controller = new AbortController();
@@ -68,8 +68,24 @@ async function callGemini(model: string, prompt: string): Promise<string> {
   }
 }
 
+/**
+ * Extracts the first JSON value from a model response. Multi-pick replies are
+ * arrays (`[ {...}, {...} ]`), single picks are objects — handle both, and
+ * tolerate markdown fences and surrounding prose.
+ */
 function extractJson(text: string): unknown {
   const cleaned = text.replace(/```(?:json)?/g, "").trim();
+
+  const arrayStart = cleaned.indexOf("[");
+  const arrayEnd = cleaned.lastIndexOf("]");
+  if (arrayStart !== -1 && arrayEnd > arrayStart) {
+    try {
+      return JSON.parse(cleaned.slice(arrayStart, arrayEnd + 1));
+    } catch {
+      // fall through to object parsing
+    }
+  }
+
   const start = cleaned.indexOf("{");
   const end = cleaned.lastIndexOf("}");
   if (start === -1 || end === -1 || end <= start) return null;
@@ -102,43 +118,65 @@ function toAIPick(value: unknown): AIPick | null {
   return { symbol, name, sector, price, changePercent, reason, confidence };
 }
 
-function ruleBasedPick(candidates: Candidate[], type: "buy" | "sell"): AIPick {
-  const top = [...candidates].sort((a, b) => b.changePercent - a.changePercent)[0];
+/** Normalizes a parsed response (array or single object) into up to `count` picks. */
+function toAIPicks(value: unknown, count: number): AIPick[] {
+  if (Array.isArray(value)) {
+    const seen = new Set<string>();
+    const picks: AIPick[] = [];
+    for (const item of value) {
+      const pick = toAIPick(item);
+      if (pick && !seen.has(pick.symbol)) {
+        seen.add(pick.symbol);
+        picks.push(pick);
+        if (picks.length >= count) break;
+      }
+    }
+    return picks;
+  }
 
-  return {
-    symbol: top.symbol,
-    name: top.name,
-    sector: top.sector,
-    price: top.price,
-    changePercent: top.changePercent,
-    reason:
-      type === "buy"
-        ? `Strong upward momentum of ${top.changePercent.toFixed(2)}%`
-        : `Weak momentum, down ${Math.abs(top.changePercent).toFixed(2)}%`,
-    confidence: "MEDIUM"
-  };
+  const pick = toAIPick(value);
+  return pick ? [pick] : [];
 }
 
+function ruleBasedPicks(
+  candidates: Candidate[],
+  type: "buy" | "sell",
+  count: number
+): AIPick[] {
+  return [...candidates]
+    .sort((a, b) => b.changePercent - a.changePercent)
+    .slice(0, count)
+    .map((top) => ({
+      symbol: top.symbol,
+      name: top.name,
+      sector: top.sector,
+      price: top.price,
+      changePercent: top.changePercent,
+      reason:
+        type === "buy"
+          ? `Strong upward momentum of ${top.changePercent.toFixed(2)}%`
+          : `Weak momentum, down ${Math.abs(top.changePercent).toFixed(2)}%`,
+      confidence: "MEDIUM" as const
+    }));
+}
+
+/**
+ * Ask the AI for the best `count` opportunities among `candidates`.
+ * Returns an array (empty when nothing qualifies). Falls back to a rule-based
+ * pick when Gemini is unavailable or misbehaves.
+ */
 export async function analyzeWithAI(
   candidates: Candidate[],
-  type: "buy" | "sell"
-): Promise<AIPick | null> {
-  if (candidates.length === 0) return null;
+  type: "buy" | "sell",
+  count = 1
+): Promise<AIPick[]> {
+  if (candidates.length === 0) return [];
+  const safeCount = Math.max(1, Math.min(count, candidates.length));
 
   const direction = type === "buy" ? "BUY" : "SELL";
+  const candidatesJson = JSON.stringify(candidates.slice(0, 10), null, 2);
 
-  const prompt = `You are a disciplined momentum analyst for NSE (India) stocks. These candidates have already been pre-filtered for movement and volume. Pick the SINGLE best ${direction} opportunity for a swing trade (2-10 days).
-
-Candidates:
-${JSON.stringify(candidates.slice(0, 10), null, 2)}
-
-Rules:
-- Prefer stocks with strong momentum, healthy volume, and a solid reason (news, sector tailwind, breakout).
-- Avoid stocks that are barely moving or have unusually low volume.
-- ALWAYS pick the best available candidate. Return null ONLY if every single candidate is genuinely weak (e.g. all moves are negligible or volume has collapsed).
-- Reply with ONLY valid JSON, no markdown, no explanation:
-
-{
+  const pickShape = `{
   "symbol": "STOCK_SYMBOL",
   "name": "Stock Name",
   "sector": "Sector",
@@ -146,12 +184,26 @@ Rules:
   "changePercent": 0,
   "reason": "One sentence explanation under 20 words",
   "confidence": "HIGH" | "MEDIUM" | "LOW"
-}
+}`;
 
-If no candidate is worth buying, reply with exactly: null`;
+  const responseInstruction =
+    safeCount === 1
+      ? `Reply with ONLY valid JSON, no markdown, no explanation:\n\n${pickShape}\n\nIf no candidate is worth buying, reply with exactly: null`
+      : `Reply with ONLY valid JSON, no markdown, no explanation. Return up to ${safeCount} distinct picks, ranked best first, as a JSON array:\n\n[${pickShape}]\n\nIf fewer than ${safeCount} candidates are worth buying, return fewer. If none, reply with exactly: null`;
+
+  const prompt = `You are a disciplined momentum analyst for NSE (India) stocks. These candidates have already been pre-filtered for movement, volume, and price band. Pick the best ${direction} opportunities for swing trades (2-10 days).
+
+Candidates:
+${candidatesJson}
+
+Rules:
+- Prefer stocks with strong momentum, healthy volume, and a solid reason (news, sector tailwind, breakout).
+- Avoid stocks that are barely moving or have unusually low volume.
+- ALWAYS pick the best available candidate. Return null ONLY if every single candidate is genuinely weak (e.g. all moves are negligible or volume has collapsed).
+${responseInstruction}`;
 
   if (!env.GEMINI_API_KEY) {
-    return ruleBasedPick(candidates, type);
+    return ruleBasedPicks(candidates, type, safeCount);
   }
 
   const model = env.GEMINI_MODEL;
@@ -162,10 +214,10 @@ If no candidate is worth buying, reply with exactly: null`;
   for (const attempt of attempts) {
     try {
       const text = await callGemini(attempt, prompt);
-      if (!text || text === "null") return null;
+      if (!text || text === "null") return [];
 
-      const pick = toAIPick(extractJson(text));
-      if (pick) return pick;
+      const picks = toAIPicks(extractJson(text), safeCount);
+      if (picks.length > 0) return picks;
 
       logger.warn(`[analyzeWithAI] Unparseable response from ${attempt}`, {
         text: text.slice(0, 300)
@@ -178,5 +230,5 @@ If no candidate is worth buying, reply with exactly: null`;
     }
   }
 
-  return ruleBasedPick(candidates, type);
+  return ruleBasedPicks(candidates, type, safeCount);
 }

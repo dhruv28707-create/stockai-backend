@@ -1,5 +1,5 @@
 import YahooFinance from "yahoo-finance2";
-import { getYahooTickers } from "../config/stocks";
+import { MARKET_MOVERS_TICKERS } from "../config/stocks";
 
 const yahooFinance = new YahooFinance();
 
@@ -28,7 +28,9 @@ const NSE_INDICES = [
   { ticker: "^NSEBANK", name: "BANK NIFTY" }
 ];
 
-const NSE_STOCKS = getYahooTickers();
+// Broad-market mover tickers for the summary display. Deliberately separate
+// from the scan watchlist (see MARKET_MOVERS_TICKERS in config/stocks.ts).
+const NSE_STOCKS = MARKET_MOVERS_TICKERS;
 
 interface IndexData {
   name: string;

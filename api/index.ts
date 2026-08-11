@@ -27,7 +27,7 @@ import {
 } from "../config/stocks";
 import { sendError, sendSuccess } from "../utils/response";
 import { getErrorMessage, getErrorCode } from "../utils/helpers";
-import { analyzeWithAI, type Candidate } from "../services/ai";
+import { analyzeWithAI, type AIPick, type Candidate } from "../services/ai";
 import { logger, toErrorContext } from "../utils/logger";
 import rateLimit from "express-rate-limit";
 
@@ -56,7 +56,7 @@ app.use(limiter);
 app.get("/api", (_req: Request, res: Response) => {
   // Version is a deployment fingerprint: check /api after deploying to confirm
   // the latest build is live.
-  sendSuccess(res, { service: "StockAI Backend", storage: "firebase", version: "1.3.0" });
+  sendSuccess(res, { service: "StockAI Backend", storage: "firebase", version: "1.4.0" });
 });
 
 app.get("/api/health", (_req: Request, res: Response) => {
@@ -385,10 +385,11 @@ app.post("/api/capital/profit", async (req: Request, res: Response) => {
 
 // ─── Cron: Buy Scan ────────────────────────────────────────────────────────────
 //
-// vercel.json schedules a single daily run that scans every batch:
+// vercel.json schedules one daily run that scans the ₹50–₹150 watchlist and
+// notifies the best BUY_SCAN_TOP_PICKS opportunities (top-N, default 3):
 //   12:00 IST → /api/cron/scan  (no batch param → batch=all)
-// Manual / external cron use:
-//   12:00 IST → /api/cron/scan?batch=1 … /api/cron/scan?batch=5
+// Manual / external cron use (legacy single-batch mode, still works):
+//   12:00 IST → /api/cron/scan?batch=1
 // Manual re-run after today's scan already completed (e.g. debugging):
 //   /api/cron/scan?force=1
 //
@@ -688,9 +689,28 @@ function buildBuyCandidates(stocks: StockInfo[], quotes: QuoteMap): Candidate[] 
 
   const minChange = env.BUY_SCAN_MIN_CHANGE_PERCENT;
   const minVolume = env.BUY_SCAN_MIN_VOLUME;
+  const minPrice = env.BUY_SCAN_MIN_PRICE;
+  const maxPrice = env.BUY_SCAN_MAX_PRICE;
 
+  if (maxPrice < minPrice) {
+    // Misconfigured env would silently block every candidate — surface it.
+    logger.warn("[buy_scan] BUY_SCAN_MAX_PRICE is below BUY_SCAN_MIN_PRICE", {
+      minPrice,
+      maxPrice
+    });
+  }
+
+  // Price-band filter: this account trades ₹50–₹150 stocks, so a watchlist
+  // name that crossed outside the band today (e.g. above ₹150) is skipped
+  // rather than notified.
   let candidates = withQuote
-    .filter((c) => c.changePercent >= minChange && c.volume >= minVolume)
+    .filter(
+      (c) =>
+        c.changePercent >= minChange &&
+        c.volume >= minVolume &&
+        c.price >= minPrice &&
+        c.price <= maxPrice
+    )
     .sort((a, b) => b.changePercent - a.changePercent);
 
   // If the strict filter finds too little today, widen to the top gainers so
@@ -699,7 +719,10 @@ function buildBuyCandidates(stocks: StockInfo[], quotes: QuoteMap): Candidate[] 
     const widened = withQuote
       .filter(
         (c) =>
-          c.changePercent > 0 && c.volume >= Math.max(10_000, Math.floor(minVolume / 2))
+          c.changePercent > 0 &&
+          c.volume >= Math.max(10_000, Math.floor(minVolume / 2)) &&
+          c.price >= minPrice &&
+          c.price <= maxPrice
       )
       .sort((a, b) => b.changePercent - a.changePercent)
       .slice(0, 8);
@@ -707,6 +730,68 @@ function buildBuyCandidates(stocks: StockInfo[], quotes: QuoteMap): Candidate[] 
   }
 
   return candidates;
+}
+
+/**
+ * Save a buy recommendation and send its push notification (with same-day
+ * dedup). Shared by legacy single-batch mode (1 pick) and the daily all-mode
+ * (top-N picks), so both behave identically.
+ */
+async function handleBuyPick(batchIndex: number, pick: AIPick): Promise<BuyScanResult> {
+  // Same-day dedup: never notify the same symbol twice in one IST day. Persisted
+  // in Firestore so it survives cold starts and duplicate triggers.
+  const dedupKey = `BUY:${pick.symbol}:${getISTDateKey()}`;
+  if (await isKeyNotified(dedupKey)) {
+    return { status: "completed", message: `Already notified ${pick.symbol} today` };
+  }
+
+  // Save recommendation to Firestore
+  const recRef = getDb().collection(collectionNames.recommendations).doc();
+  await recRef.set({
+    id: recRef.id,
+    userId: env.SINGLE_USER_ID,
+    symbol: pick.symbol,
+    name: pick.name,
+    action: "BUY",
+    currentPrice: pick.price,
+    entryPrice: pick.price,
+    changePercent: pick.changePercent,
+    reason: pick.reason,
+    confidence: pick.confidence,
+    sector: pick.sector,
+    status: "pending",
+    source: "buy_scan",
+    batch: batchIndex,
+    createdAt: Timestamp.now(),
+    updatedAt: Timestamp.now()
+  });
+
+  // Send push notification
+  const push = await sendPushNotification(
+    `📈 Buy Signal: ${pick.symbol}`,
+    `${pick.name} is up ${pick.changePercent.toFixed(2)}% — ${pick.reason}`,
+    "BUY_ALERT",
+    "HIGH",
+    pick.symbol
+  );
+
+  // Only mark as notified once the push actually went out — a failed push
+  // stays eligible for retry on the next scan.
+  if (push.sent) {
+    await markKeyNotified(dedupKey);
+  }
+
+  const message = push.sent
+    ? `Notified: ${pick.symbol}`
+    : `Saved ${pick.symbol} but push failed: ${push.error ?? "unknown error"}`;
+
+  return {
+    status: "completed",
+    message,
+    notified: pick.symbol,
+    pushSent: push.sent,
+    pushError: push.error
+  };
 }
 
 async function runBuyScan(
@@ -739,80 +824,27 @@ async function runBuyScan(
     return { status: "no_candidates", message: "No candidates found" };
   }
 
-  // Use AI to pick the best opportunity from this batch's candidates
-  const aiPick = await analyzeWithAI(candidates.slice(0, 10), "buy");
+  // Legacy single-batch mode (external crons): notify the 1 best pick.
+  const picks = await analyzeWithAI(candidates.slice(0, 10), "buy", 1);
 
-  if (!aiPick) {
+  if (picks.length === 0) {
     await logCronRun("buy_scan", batchIndex, "completed", "AI found no strong signal");
     return { status: "completed", message: "AI found no strong signal" };
   }
 
-  // Same-day dedup: never notify the same symbol twice in one IST day. Persisted
-  // in Firestore so it survives cold starts and duplicate triggers.
-  const dedupKey = `BUY:${aiPick.symbol}:${getISTDateKey()}`;
-  if (await isKeyNotified(dedupKey)) {
-    await logCronRun(
-      "buy_scan",
-      batchIndex,
-      "completed",
-      `Already notified ${aiPick.symbol} today`
-    );
-    return { status: "completed", message: `Already notified ${aiPick.symbol} today` };
-  }
-
-  // Save recommendation to Firestore
-  const recRef = getDb().collection(collectionNames.recommendations).doc();
-  await recRef.set({
-    id: recRef.id,
-    userId: env.SINGLE_USER_ID,
-    symbol: aiPick.symbol,
-    name: aiPick.name,
-    action: "BUY",
-    currentPrice: aiPick.price,
-    entryPrice: aiPick.price,
-    changePercent: aiPick.changePercent,
-    reason: aiPick.reason,
-    confidence: aiPick.confidence,
-    sector: aiPick.sector,
-    status: "pending",
-    source: "buy_scan",
-    batch: batchIndex,
-    createdAt: Timestamp.now(),
-    updatedAt: Timestamp.now()
-  });
-
-  // Send push notification
-  const push = await sendPushNotification(
-    `📈 Buy Signal: ${aiPick.symbol}`,
-    `${aiPick.name} is up ${aiPick.changePercent.toFixed(2)}% — ${aiPick.reason}`,
-    "BUY_ALERT",
-    "HIGH",
-    aiPick.symbol
-  );
-
-  // Only mark as notified once the push actually went out — a failed push
-  // stays eligible for retry on the next scan.
-  if (push.sent) {
-    await markKeyNotified(dedupKey);
-  }
-
-  const message = push.sent
-    ? `Notified: ${aiPick.symbol}`
-    : `Saved ${aiPick.symbol} but push failed: ${push.error ?? "unknown error"}`;
-  await logCronRun("buy_scan", batchIndex, "completed", message);
-
-  return {
-    status: "completed",
-    message,
-    notified: aiPick.symbol,
-    pushSent: push.sent,
-    pushError: push.error
-  };
+  const result = await handleBuyPick(batchIndex, picks[0]);
+  await logCronRun("buy_scan", batchIndex, "completed", result.message);
+  return result;
 }
 
 async function runBuyScanAll(): Promise<BuyScanResult[]> {
-  // Fetch quotes for the whole universe (Yahoo batches internally; Angel One
-  // mode sends one request) — keeps us safely under Vercel's 60s cap.
+  if (env.SCAN_DATA_SOURCE === "angelone" && !isAngelOneConfigured()) {
+    await logCronRun("buy_scan", 0, "skipped", "Angel One not configured");
+    return [{ status: "skipped", message: "Angel One not configured" }];
+  }
+
+  // Fetch quotes for the whole watchlist in one go (Yahoo batches internally;
+  // Angel One mode sends one request) — keeps us safely under Vercel's 60s cap.
   let allQuotes: QuoteMap;
   try {
     allQuotes = await fetchScanQuotes();
@@ -822,8 +854,11 @@ async function runBuyScanAll(): Promise<BuyScanResult[]> {
     return [{ status: "failed", message }];
   }
 
-  // AI analysis is the slow part — run the batches in parallel.
-  const pending: Promise<BuyScanResult>[] = [];
+  // Build candidates across the whole watchlist (band-filtered), then let the
+  // AI rank the best BUY_SCAN_TOP_PICKS opportunities overall — not one per
+  // batch. With a ~30-stock watchlist this is one quote call + one AI call,
+  // far lighter than the old 5-batch, 150-stock scan.
+  const candidates: Candidate[] = [];
   for (let batch = 1; batch <= TOTAL_BATCHES; batch++) {
     const batchStocks = getBatch(batch);
     const batchQuotes: QuoteMap = {};
@@ -833,20 +868,40 @@ async function runBuyScanAll(): Promise<BuyScanResult[]> {
     if (Object.keys(batchQuotes).length === 0) {
       const message = `No quotes returned for batch ${batch}`;
       await logCronRun("buy_scan", batch, "failed", message);
-      pending.push(Promise.resolve({ status: "failed", message }));
-      continue;
+      return [{ status: "failed", message }];
     }
-    pending.push(runBuyScan(batch, batchStocks, batchQuotes));
+    candidates.push(...buildBuyCandidates(batchStocks, batchQuotes));
   }
 
-  const results = await Promise.all(pending);
+  if (candidates.length === 0) {
+    await logCronRun("buy_scan", 0, "completed", "No candidates found");
+    await markRunCompleted("buy_scan", "No candidates found");
+    return [{ status: "completed", message: "No candidates found" }];
+  }
 
-  // Only mark today's run as completed when every batch finished without a
-  // hard failure — a partially failed scan stays eligible for a retry.
+  const topCandidates = candidates
+    .sort((a, b) => b.changePercent - a.changePercent)
+    .slice(0, 15);
+
+  const picks = await analyzeWithAI(topCandidates, "buy", env.BUY_SCAN_TOP_PICKS);
+
+  if (picks.length === 0) {
+    await logCronRun("buy_scan", 0, "completed", "AI found no strong signal");
+    await markRunCompleted("buy_scan", "AI found no strong signal");
+    return [{ status: "completed", message: "AI found no strong signal" }];
+  }
+
+  const results: BuyScanResult[] = [];
+  for (const pick of picks) {
+    results.push(await handleBuyPick(0, pick));
+  }
+
+  // Only mark today's run as completed when nothing hard-failed — a partially
+  // failed scan stays eligible for a retry.
   const failed = results.filter((r) => r.status === "failed").length;
   if (failed === 0) {
     const notified = results.filter((r) => r.notified).length;
-    await markRunCompleted("buy_scan", `${results.length} batches, ${notified} notified`);
+    await markRunCompleted("buy_scan", `${results.length} picks, ${notified} notified`);
   }
 
   return results;
@@ -878,8 +933,25 @@ async function runSellScan(batchIndex: number): Promise<SellScanResult> {
 
   let quotes: QuoteMap;
   try {
-    // Fetch quotes for all batches to cover all open positions
-    quotes = await fetchScanQuotes();
+    // Fetch quotes for the watchlist PLUS every open position's symbol, so
+    // positions from the old large-cap universe (e.g. earlier buy signals)
+    // keep getting stop-loss / profit-target alerts.
+    if (env.SCAN_DATA_SOURCE === "angelone") {
+      // Note: getQuotes() only covers the watchlist universe, so legacy
+      // large-cap positions get no quotes in Angel One mode. Acceptable —
+      // Angel One is broken from cloud IPs anyway (the Yahoo path below
+      // unions position tickers and is the default).
+      quotes = await getQuotes();
+    } else {
+      const universeTickers = ALL_STOCKS.map((s) => s.yahooTicker);
+      const positionTickers = positions
+        .map((p) => String(p.symbol ?? ""))
+        .filter(Boolean)
+        .map((symbol) => `${symbol}.NS`);
+      quotes = await getYahooScanQuotes([
+        ...new Set([...universeTickers, ...positionTickers])
+      ]);
+    }
   } catch (err) {
     const message = getErrorMessage(err);
     await logCronRun("sell_scan", batchIndex, "failed", message);

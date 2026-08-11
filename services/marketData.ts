@@ -80,7 +80,9 @@ function getFallbackMarketStatus(): "OPEN" | "PRE_OPEN" | "CLOSED" {
   return "CLOSED";
 }
 
-function getMarketStatus(indexQuote?: Record<string, unknown>): "OPEN" | "PRE_OPEN" | "CLOSED" {
+function getMarketStatus(
+  indexQuote?: Record<string, unknown>
+): "OPEN" | "PRE_OPEN" | "CLOSED" {
   const exchangeState = String(
     indexQuote?.marketState ?? indexQuote?.fullExchangeName ?? ""
   ).toUpperCase();
@@ -100,23 +102,90 @@ function getMarketStatus(indexQuote?: Record<string, unknown>): "OPEN" | "PRE_OP
 
 const YAHOO_BATCH = 30;
 
-async function fetchYahooQuotes(tickers: string[]): Promise<Record<string, Record<string, unknown>>> {
+async function fetchYahooQuotes(
+  tickers: string[]
+): Promise<Record<string, Record<string, unknown>>> {
   const quotes: Record<string, Record<string, unknown>> = {};
   for (let i = 0; i < tickers.length; i += YAHOO_BATCH) {
     const batch = tickers.slice(i, i + YAHOO_BATCH);
     let results: (Record<string, unknown> | null)[];
     try {
-      results = (await yahooFinance.quote(batch, {}, { validateResult: false })) as (Record<string, unknown> | null)[];
+      results = (await yahooFinance.quote(
+        batch,
+        {},
+        { validateResult: false }
+      )) as (Record<string, unknown> | null)[];
     } catch {
       continue;
     }
     if (Array.isArray(results)) {
-      results.forEach((result, j) => {
-        if (result) quotes[batch[j]] = result;
+      // Yahoo does not guarantee response order — key by the symbol it
+      // actually returned, never by array index.
+      results.forEach((result) => {
+        if (!result) return;
+        const symbol = typeof result.symbol === "string" ? result.symbol : "";
+        if (symbol) quotes[symbol] = result;
       });
     }
   }
   return quotes;
+}
+
+export interface ScanQuote {
+  ltp: number;
+  dayChange: number;
+  dayChangePercentage: number;
+  volume: number;
+  high: number;
+  low: number;
+}
+
+/**
+ * Quotes for the scan pipeline, keyed by clean NSE symbol (e.g. "HDFCBANK").
+ * Yahoo does not return results in the requested order, so we map by the
+ * `symbol` field Yahoo actually returned (never by array index).
+ */
+export async function getYahooScanQuotes(
+  tickers: string[]
+): Promise<Record<string, ScanQuote>> {
+  const result: Record<string, ScanQuote> = {};
+
+  for (let i = 0; i < tickers.length; i += YAHOO_BATCH) {
+    const batch = tickers.slice(i, i + YAHOO_BATCH);
+    let results: (Record<string, unknown> | null)[] | null;
+    try {
+      results = (await yahooFinance.quote(
+        batch,
+        {},
+        { validateResult: false }
+      )) as (Record<string, unknown> | null)[];
+    } catch {
+      continue;
+    }
+    if (!Array.isArray(results)) continue;
+
+    results.forEach((q, j) => {
+      if (!q) return;
+      const returnedSymbol =
+        typeof q.symbol === "string" && q.symbol ? q.symbol : batch[j];
+      const cleanSymbol = returnedSymbol.replace(/\.NS$/, "").replace("-EQ", "");
+      const price = (q.regularMarketPrice as number) ?? 0;
+      const prevClose = (q.regularMarketPreviousClose as number) ?? price;
+      const change = price - prevClose;
+      result[cleanSymbol] = {
+        ltp: price,
+        dayChange: Math.round(change * 100) / 100,
+        dayChangePercentage: prevClose
+          ? Math.round((change / prevClose) * 10000) / 100
+          : 0,
+        volume: (q.regularMarketVolume as number) ?? 0,
+        high: (q.regularMarketDayHigh as number) ?? price,
+        low: (q.regularMarketDayLow as number) ?? price
+      };
+    });
+  }
+
+  return result;
 }
 
 export async function getMarketSummary(): Promise<MarketSummary> {

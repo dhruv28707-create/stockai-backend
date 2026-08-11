@@ -11,18 +11,18 @@ import {
   registerDeviceToken,
   sendPushNotification
 } from "../services/fcm";
-import { getMarketSummary } from "../services/marketData";
+import { getMarketSummary, getYahooScanQuotes } from "../services/marketData";
 import {
   getAngelOneMarketSummary,
   getQuotes,
-  isAngelOneConfigured,
-  type AngelOneQuoteData
+  isAngelOneConfigured
 } from "../services/angelone";
 import {
   getBatch,
   BATCH_SIZE,
   TOTAL_BATCHES,
   TOTAL_STOCKS,
+  ALL_STOCKS,
   type StockInfo
 } from "../config/stocks";
 import { sendError, sendSuccess } from "../utils/response";
@@ -56,7 +56,7 @@ app.use(limiter);
 app.get("/api", (_req: Request, res: Response) => {
   // Version is a deployment fingerprint: check /api after deploying to confirm
   // the latest build is live.
-  sendSuccess(res, { service: "StockAI Backend", storage: "firebase", version: "1.1.0" });
+  sendSuccess(res, { service: "StockAI Backend", storage: "firebase", version: "1.2.0" });
 });
 
 app.get("/api/health", (_req: Request, res: Response) => {
@@ -485,7 +485,31 @@ app.get("/api/stocks/universe", async (_req: Request, res: Response) => {
 
 // ─── Buy Scan Logic ───────────────────────────────────────────────────────────
 
-type QuoteMap = Record<string, AngelOneQuoteData>;
+interface ScanQuoteData {
+  ltp: number;
+  dayChange: number;
+  dayChangePercentage: number;
+  volume: number;
+  high: number;
+  low: number;
+}
+
+type QuoteMap = Record<string, ScanQuoteData>;
+
+/**
+ * Fetch quotes for the scans. Defaults to Yahoo Finance (works from Vercel's
+ * cloud IPs); Angel One is opt-in via SCAN_DATA_SOURCE=angelone and only
+ * works from a residential IP because its WAF blocks datacenter ranges.
+ */
+async function fetchScanQuotes(batchIndex?: number): Promise<QuoteMap> {
+  if (env.SCAN_DATA_SOURCE === "angelone") {
+    return getQuotes(batchIndex);
+  }
+  const tickers = batchIndex
+    ? getBatch(batchIndex).map((s) => s.yahooTicker)
+    : ALL_STOCKS.map((s) => s.yahooTicker);
+  return getYahooScanQuotes(tickers);
+}
 
 interface BuyScanResult {
   status: "completed" | "failed" | "skipped" | "no_candidates";
@@ -567,7 +591,7 @@ async function runBuyScan(
   pruneNotifiedKeys();
   await logCronRun("buy_scan", batchIndex, "running");
 
-  if (!isAngelOneConfigured()) {
+  if (env.SCAN_DATA_SOURCE === "angelone" && !isAngelOneConfigured()) {
     await logCronRun("buy_scan", batchIndex, "skipped", "Angel One not configured");
     return { status: "skipped", message: "Angel One not configured" };
   }
@@ -575,7 +599,7 @@ async function runBuyScan(
   let quoteMap = quotes;
   if (!quoteMap) {
     try {
-      quoteMap = await getQuotes(batchIndex);
+      quoteMap = await fetchScanQuotes(batchIndex);
     } catch (err) {
       const message = getErrorMessage(err);
       await logCronRun("buy_scan", batchIndex, "failed", message);
@@ -663,11 +687,11 @@ async function runBuyScan(
 async function runBuyScanAll(): Promise<BuyScanResult[]> {
   pruneNotifiedKeys();
 
-  // Fetch quotes for the whole universe in ONE request (well within Angel
-  // One's 500-symbol quote limit) — keeps us safely under Vercel's 60s cap.
+  // Fetch quotes for the whole universe (Yahoo batches internally; Angel One
+  // mode sends one request) — keeps us safely under Vercel's 60s cap.
   let allQuotes: QuoteMap;
   try {
-    allQuotes = await getQuotes();
+    allQuotes = await fetchScanQuotes();
   } catch (err) {
     const message = getErrorMessage(err);
     await logCronRun("buy_scan", 0, "failed", message);
@@ -712,7 +736,7 @@ async function runSellScan(batchIndex: number): Promise<SellScanResult> {
     return { status: "completed", message: "No open positions", alertsSent: 0 };
   }
 
-  if (!isAngelOneConfigured()) {
+  if (env.SCAN_DATA_SOURCE === "angelone" && !isAngelOneConfigured()) {
     await logCronRun("sell_scan", batchIndex, "skipped", "Angel One not configured");
     return { status: "skipped", message: "Angel One not configured", alertsSent: 0 };
   }
@@ -722,7 +746,7 @@ async function runSellScan(batchIndex: number): Promise<SellScanResult> {
   let quotes: QuoteMap;
   try {
     // Fetch quotes for all batches to cover all open positions
-    quotes = await getQuotes();
+    quotes = await fetchScanQuotes();
   } catch (err) {
     const message = getErrorMessage(err);
     await logCronRun("sell_scan", batchIndex, "failed", message);

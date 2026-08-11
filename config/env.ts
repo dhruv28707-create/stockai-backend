@@ -20,6 +20,10 @@ const envSchema = z.object({
   GEMINI_MODEL: z.string().min(1).default("gemini-3.6-flash"),
   BUY_SCAN_MIN_CHANGE_PERCENT: z.coerce.number().min(0).default(1),
   BUY_SCAN_MIN_VOLUME: z.coerce.number().min(0).default(30_000),
+  // "yahoo" works from any host (Vercel included); "angelone" is real-time
+  // but its WAF blocks cloud/datacenter IPs, so it only works from a
+  // residential IP.
+  SCAN_DATA_SOURCE: z.enum(["yahoo", "angelone"]).default("yahoo"),
   CORS_ORIGIN: z.string().optional().default("*"),
   ANGEL_ONE_CLIENT_LOCAL_IP: z.string().optional().default("192.168.1.100"),
   ANGEL_ONE_CLIENT_PUBLIC_IP: z.string().optional().default("103.95.97.4"),

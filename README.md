@@ -87,6 +87,9 @@ You can also trigger the buy scan manually at any time: `GET /api/cron/scan?batc
 
 ## Buy-scan tuning (optional env vars)
 
+- `SCAN_DATA_SOURCE` (default `yahoo`) — market data source for the scans.
+  - `yahoo` — works from any host, including Vercel's serverless IPs. **Default.**
+  - `angelone` — real-time NSE data, but Angel One's WAF blocks cloud/datacenter IPs, so this only works when the backend runs from a residential IP. If you see `Request Rejected` errors from Angel One, that's this.
 - `BUY_SCAN_MIN_CHANGE_PERCENT` (default `1`) — minimum intraday % gain for a candidate.
 - `BUY_SCAN_MIN_VOLUME` (default `30000`) — minimum volume for a candidate.
 - `GEMINI_MODEL` (default `gemini-3.6-flash`) — AI model used to pick the best signal; falls back to `gemini-2.5-flash` on failure.

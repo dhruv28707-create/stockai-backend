@@ -54,7 +54,9 @@ app.use(limiter);
 // ─── Health & Info ────────────────────────────────────────────────────────────
 
 app.get("/api", (_req: Request, res: Response) => {
-  sendSuccess(res, { service: "StockAI Backend", storage: "firebase", version: "1.0.0" });
+  // Version is a deployment fingerprint: check /api after deploying to confirm
+  // the latest build is live.
+  sendSuccess(res, { service: "StockAI Backend", storage: "firebase", version: "1.1.0" });
 });
 
 app.get("/api/health", (_req: Request, res: Response) => {

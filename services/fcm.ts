@@ -201,12 +201,31 @@ async function clearInvalidDeviceToken(token: string): Promise<void> {
   }
 }
 
+// Firestore rejects `undefined` values, and metadata often carries optional
+// fields (symbol/actionUrl). Recursively strip them so history logging
+// actually succeeds.
+function stripUndefined(value: unknown): unknown {
+  if (Array.isArray(value)) return value.map(stripUndefined);
+  if (value && typeof value === "object") {
+    return Object.fromEntries(
+      Object.entries(value as Record<string, unknown>)
+        .filter(([, v]) => v !== undefined)
+        .map(([k, v]) => [k, stripUndefined(v)])
+    );
+  }
+  return value;
+}
+
 async function logNotification(data: Record<string, unknown>): Promise<void> {
   try {
     const notificationRef = getDb().collection(collectionNames.notifications).doc();
-    await notificationRef.set({ id: notificationRef.id, ...data });
-  } catch {
-    // Notification delivery result is more important than history logging.
+    const safeData = stripUndefined(data) as Record<string, unknown>;
+    await notificationRef.set({ id: notificationRef.id, ...safeData });
+  } catch (err) {
+    // History logging must never block delivery, but don't hide the failure.
+    logger.warn("[fcm] Failed to log notification", {
+      error: err instanceof Error ? err.message : String(err)
+    });
   }
 }
 

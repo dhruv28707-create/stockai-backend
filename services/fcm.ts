@@ -84,6 +84,20 @@ export async function getNotificationTokenStatus(): Promise<{
   return { hasToken: false, tokenPrefix: null, tokenLength: null, source: "none" };
 }
 
+// Human-readable IST label (e.g. "16 Aug 2026, 4:05 PM") so the app can show
+// a concrete time instead of a vague relative one like "just now".
+function getISTTimestampLabel(date = new Date()): string {
+  return new Intl.DateTimeFormat("en-IN", {
+    timeZone: "Asia/Kolkata",
+    day: "2-digit",
+    month: "short",
+    year: "numeric",
+    hour: "numeric",
+    minute: "2-digit",
+    hour12: true
+  }).format(date);
+}
+
 export async function sendPushNotification(
   title: string,
   body: string,
@@ -95,6 +109,14 @@ export async function sendPushNotification(
   const token = await resolveDeviceToken();
   const metadata: PushMetadata = { type, priority, symbol, actionUrl };
   const channel = getNotificationChannel(type);
+  const now = new Date();
+
+  // Carried in the FCM data payload so the app can render a real timestamp
+  // instead of defaulting to "just now".
+  const timestampData = {
+    timestamp: now.toISOString(),
+    timestampLabel: getISTTimestampLabel(now)
+  };
 
   if (!token) {
     await logNotification({
@@ -105,6 +127,7 @@ export async function sendPushNotification(
       status: "failed",
       errorMessage: "No FCM device token registered.",
       metadata,
+      ...timestampData,
       createdAt: Timestamp.now(),
       updatedAt: Timestamp.now()
     });
@@ -116,7 +139,7 @@ export async function sendPushNotification(
       token,
       notification: { title, body },
       data: Object.fromEntries(
-        Object.entries(metadata)
+        Object.entries({ ...metadata, ...timestampData })
           .filter(([, value]) => value !== undefined)
           .map(([key, value]) => [key, String(value)])
       ),
@@ -148,6 +171,7 @@ export async function sendPushNotification(
       deviceToken: token,
       messageId,
       metadata,
+      ...timestampData,
       sentAt: Timestamp.now(),
       createdAt: Timestamp.now(),
       updatedAt: Timestamp.now()
@@ -176,6 +200,7 @@ export async function sendPushNotification(
       errorMessage,
       errorCode,
       metadata,
+      ...timestampData,
       createdAt: Timestamp.now(),
       updatedAt: Timestamp.now()
     });

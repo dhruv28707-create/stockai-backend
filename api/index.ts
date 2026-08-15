@@ -56,7 +56,7 @@ app.use(limiter);
 app.get("/api", (_req: Request, res: Response) => {
   // Version is a deployment fingerprint: check /api after deploying to confirm
   // the latest build is live.
-  sendSuccess(res, { service: "StockAI Backend", storage: "firebase", version: "1.6.0" });
+  sendSuccess(res, { service: "StockAI Backend", storage: "firebase", version: "1.6.1" });
 });
 
 app.get("/api/health", (_req: Request, res: Response) => {

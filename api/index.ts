@@ -11,7 +11,7 @@ import {
   registerDeviceToken,
   sendPushNotification
 } from "../services/fcm";
-import { getMarketSummary, getYahooScanQuotes } from "../services/marketData";
+import { getLiveMarketData, getMarketSummary, getYahooScanQuotes } from "../services/marketData";
 import {
   getAngelOneMarketSummary,
   getQuotes,
@@ -56,7 +56,7 @@ app.use(limiter);
 app.get("/api", (_req: Request, res: Response) => {
   // Version is a deployment fingerprint: check /api after deploying to confirm
   // the latest build is live.
-  sendSuccess(res, { service: "StockAI Backend", storage: "firebase", version: "1.4.0" });
+  sendSuccess(res, { service: "StockAI Backend", storage: "firebase", version: "1.6.0" });
 });
 
 app.get("/api/health", (_req: Request, res: Response) => {
@@ -71,6 +71,59 @@ app.get("/api/market/summary", async (_req: Request, res: Response) => {
   } catch (error) {
     sendError(res, 500, `Failed to fetch market data: ${getErrorMessage(error)}`);
   }
+});
+
+// Live watchlist snapshot for the app's "moving digits" ticker. Poll this
+// every few seconds (the response itself is cached for ~5s server-side).
+app.get("/api/market/live", async (_req: Request, res: Response) => {
+  try {
+    sendSuccess(res, await getLiveMarketData());
+  } catch (error) {
+    sendError(res, 500, `Failed to fetch live market data: ${getErrorMessage(error)}`);
+  }
+});
+
+// Server-Sent Events stream: pushes a fresh live snapshot every 5s while the
+// client stays connected — the same data as /api/market/live, but the app
+// doesn't need to poll; digits update on their own like Angel One's feed.
+//
+// Note for Vercel: serverless functions cap streaming at maxDuration (60s in
+// vercel.json), so the connection drops and the client must reconnect (SSE
+// clients do this automatically). When self-hosted (npm run dev/start) the
+// stream stays open indefinitely.
+app.get("/api/market/stream", async (req: Request, res: Response) => {
+  res.setHeader("Content-Type", "text/event-stream");
+  res.setHeader("Cache-Control", "no-cache, no-transform");
+  res.setHeader("Connection", "keep-alive");
+  res.setHeader("X-Accel-Buffering", "no");
+  res.flushHeaders();
+
+  let closed = false;
+  const send = (event: string, data: unknown) => {
+    if (closed) return;
+    try {
+      res.write(`event: ${event}\ndata: ${JSON.stringify(data)}\n\n`);
+    } catch {
+      // client already gone — loop will stop on 'close'
+    }
+  };
+
+  const pushLive = async () => {
+    try {
+      send("update", await getLiveMarketData());
+    } catch (error) {
+      send("error", { message: getErrorMessage(error) });
+    }
+  };
+
+  await pushLive();
+
+  const interval = setInterval(pushLive, 5_000);
+
+  req.on("close", () => {
+    closed = true;
+    clearInterval(interval);
+  });
 });
 
 app.get("/api/market/angelone/summary", async (req: Request, res: Response) => {
@@ -385,9 +438,9 @@ app.post("/api/capital/profit", async (req: Request, res: Response) => {
 
 // ─── Cron: Buy Scan ────────────────────────────────────────────────────────────
 //
-// vercel.json schedules one daily run that scans the ₹50–₹150 watchlist and
-// notifies the best BUY_SCAN_TOP_PICKS opportunities (top-N, default 3):
-//   12:00 IST → /api/cron/scan  (no batch param → batch=all)
+// vercel.json schedules one daily run that scans the ₹40–₹150 watchlist and
+// notifies the best BUY_SCAN_TOP_PICKS opportunities (top-N, default 5):
+//   12:00 PM IST → /api/cron/scan  (no batch param → batch=all)
 // Manual / external cron use (legacy single-batch mode, still works):
 //   12:00 IST → /api/cron/scan?batch=1
 // Manual re-run after today's scan already completed (e.g. debugging):
@@ -732,6 +785,49 @@ function buildBuyCandidates(stocks: StockInfo[], quotes: QuoteMap): Candidate[] 
   return candidates;
 }
 
+interface TradePlan {
+  entryPrice: number;
+  quantity: number;
+  stopLoss: number;
+  target: number;
+  expectedReturnPercent: number;
+  expectedReturn: number;
+}
+
+/**
+ * Build a simple trade plan for a buy pick so the notification can tell the
+ * user exactly what to do:
+ *   - quantity  = max rupees to deploy per trade ÷ entry price
+ *   - stop loss = entry × (1 − BUY_SCAN_STOP_LOSS_PERCENT%)
+ *   - target    = entry × (1 + BUY_SCAN_TARGET_PERCENT%)
+ *   - expected return (₹) = quantity × (target − entry)
+ * Rupees per trade comes from the monthly setup's maxTradeCapital when one
+ * exists, otherwise BUY_SCAN_DEFAULT_CAPITAL.
+ */
+async function buildTradePlan(entryPrice: number): Promise<TradePlan> {
+  const setup = await getCurrentMonthlySetup();
+  const maxTradeCapital = Number(setup?.maxTradeCapital);
+  const tradeCapital =
+    Number.isFinite(maxTradeCapital) && maxTradeCapital > 0
+      ? maxTradeCapital
+      : env.BUY_SCAN_DEFAULT_CAPITAL;
+
+  const slPercent = env.BUY_SCAN_STOP_LOSS_PERCENT;
+  const targetPercent = env.BUY_SCAN_TARGET_PERCENT;
+  const quantity = Math.max(1, Math.floor(tradeCapital / entryPrice));
+  const stopLoss = Math.round(entryPrice * (1 - slPercent / 100) * 100) / 100;
+  const target = Math.round(entryPrice * (1 + targetPercent / 100) * 100) / 100;
+
+  return {
+    entryPrice,
+    quantity,
+    stopLoss,
+    target,
+    expectedReturnPercent: targetPercent,
+    expectedReturn: Math.round(quantity * (target - entryPrice))
+  };
+}
+
 /**
  * Save a buy recommendation and send its push notification (with same-day
  * dedup). Shared by legacy single-batch mode (1 pick) and the daily all-mode
@@ -745,7 +841,10 @@ async function handleBuyPick(batchIndex: number, pick: AIPick): Promise<BuyScanR
     return { status: "completed", message: `Already notified ${pick.symbol} today` };
   }
 
-  // Save recommendation to Firestore
+  const plan = await buildTradePlan(pick.price);
+
+  // Save recommendation to Firestore (trade plan included so the app can
+  // render the same numbers the notification shows).
   const recRef = getDb().collection(collectionNames.recommendations).doc();
   await recRef.set({
     id: recRef.id,
@@ -754,7 +853,7 @@ async function handleBuyPick(batchIndex: number, pick: AIPick): Promise<BuyScanR
     name: pick.name,
     action: "BUY",
     currentPrice: pick.price,
-    entryPrice: pick.price,
+    entryPrice: plan.entryPrice,
     changePercent: pick.changePercent,
     reason: pick.reason,
     confidence: pick.confidence,
@@ -762,14 +861,23 @@ async function handleBuyPick(batchIndex: number, pick: AIPick): Promise<BuyScanR
     status: "pending",
     source: "buy_scan",
     batch: batchIndex,
+    quantity: plan.quantity,
+    stopLoss: plan.stopLoss,
+    target: plan.target,
+    expectedReturn: plan.expectedReturn,
+    expectedReturnPercent: plan.expectedReturnPercent,
     createdAt: Timestamp.now(),
     updatedAt: Timestamp.now()
   });
 
-  // Send push notification
+  // Send push notification with the full trade plan.
   const push = await sendPushNotification(
     `📈 Buy Signal: ${pick.symbol}`,
-    `${pick.name} is up ${pick.changePercent.toFixed(2)}% — ${pick.reason}`,
+    [
+      `${pick.name} is up ${pick.changePercent.toFixed(2)}% — ${pick.reason}`,
+      `Buy ${plan.quantity} @ ₹${plan.entryPrice.toFixed(2)} | SL ₹${plan.stopLoss.toFixed(2)} | Target ₹${plan.target.toFixed(2)}`,
+      `Exp. return ₹${plan.expectedReturn} (${plan.expectedReturnPercent}%)`
+    ].join("\n"),
     "BUY_ALERT",
     "HIGH",
     pick.symbol

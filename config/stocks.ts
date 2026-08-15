@@ -6,15 +6,15 @@ export interface StockInfo {
   sector: string;
 }
 
-// ─── Watchlist: liquid NSE stocks in the ₹50–₹150 band ───────────────────────
+// ─── Watchlist: liquid NSE stocks in the ₹40–₹150 band ───────────────────────
 //
 // Replaces the old 150-stock large-cap universe (which had only 9 names under
 // ₹100 and never matched this account's trading style).
 //
-// Built by screening a pool of ~270 NSE tickers against live Yahoo quotes on
-// 2026-08-11 and keeping names with:
-//   - price in the ₹50–₹150 band
-//   - day volume ≥ ~200k shares (real liquidity)
+// Built by screening a pool of NSE tickers against live Yahoo quotes on
+// 2026-08-16 and keeping names with:
+//   - price in the ₹40–₹150 band
+//   - day volume ≥ ~50k shares (real liquidity)
 // Prices drift — the scan itself enforces BUY_SCAN_MIN_PRICE/MAX_PRICE, so a
 // stock that crosses out of the band is simply skipped that day (see
 // buildBuyCandidates in api/index.ts). To rebuild the list from live data,
@@ -95,6 +95,12 @@ const RAW_STOCKS: { symbol: string; name: string; sector: string }[] = [
 
   // Media & Broadcasting
   { symbol: "GTPL", name: "GTPL Hathway", sector: "Media & Broadcasting" },
+  { symbol: "ZEEL", name: "Zee Entertainment Enterprises", sector: "Media & Broadcasting" },
+  { symbol: "INOXWIND", name: "Inox Wind", sector: "Power & Utilities" },
+  { symbol: "UJJIVANSFB", name: "Ujjivan Small Finance Bank", sector: "Banking & Financial Services" },
+  { symbol: "EQUITASBNK", name: "Equitas Small Finance Bank", sector: "Banking & Financial Services" },
+  { symbol: "SOUTHBANK", name: "The South Indian Bank", sector: "Banking & Financial Services" },
+  { symbol: "SANGHIIND", name: "Sanghi Industries", sector: "Cement & Building Materials" },
 
   // Real Estate
   { symbol: "SHRIRAMPPS", name: "Shriram Properties", sector: "Real Estate" }
@@ -109,7 +115,7 @@ export const ALL_STOCKS: StockInfo[] = RAW_STOCKS.map((s) => ({
 // ─── Broad market movers (display only) ───────────────────────────────────────
 //
 // Used only by the market summary (/api/market/summary) so its gainers/losers
-// and volume stats reflect the broad NSE market — NOT the ₹50–₹150 watchlist
+// and volume stats reflect the broad NSE market — NOT the ₹40–₹150 watchlist
 // above, which is exclusively for the buy/sell scans.
 
 export const MARKET_MOVERS_TICKERS: string[] = [

@@ -1,5 +1,9 @@
 import YahooFinance from "yahoo-finance2";
-import { MARKET_MOVERS_TICKERS } from "../config/stocks";
+import {
+  ALL_STOCKS,
+  getYahooTickers,
+  MARKET_MOVERS_TICKERS
+} from "../config/stocks";
 
 const yahooFinance = new YahooFinance();
 
@@ -22,6 +26,9 @@ function setCache<T>(key: string, data: T, ttlMs: number): void {
 }
 
 const CACHE_TTL = 60_000;
+// Short-TTL cache for the live quotes endpoint/stream, so the app can poll
+// every few seconds and show moving digits without hammering Yahoo.
+const LIVE_CACHE_TTL = 5_000;
 
 const NSE_INDICES = [
   { ticker: "^NSEI", name: "NIFTY 50" },
@@ -262,5 +269,96 @@ export async function getMarketSummary(): Promise<MarketSummary> {
   };
 
   setCache("market_summary", result, CACHE_TTL);
+  return result;
+}
+
+export interface LiveQuote {
+  symbol: string;
+  name: string;
+  sector: string;
+  price: number;
+  change: number;
+  changePercent: number;
+  volume: number;
+  high: number;
+  low: number;
+}
+
+export interface LiveMarketData {
+  source: string;
+  isMarketOpen: boolean;
+  indices: IndexData[];
+  quotes: LiveQuote[];
+  topGainers: LiveQuote[];
+  topLosers: LiveQuote[];
+  updatedAt: string;
+}
+
+/**
+ * Lightweight live snapshot of the watchlist + indices, cached for a few
+ * seconds only. Intended for the app's "moving digits" ticker: poll
+ * /api/market/live (or subscribe to /api/market/stream) every few seconds.
+ * Only the watchlist (33 stocks) + 2 indices are fetched, so it's far
+ * cheaper than the full /api/market/summary (which covers ~110 movers).
+ */
+export async function getLiveMarketData(): Promise<LiveMarketData> {
+  const cached = getCached<LiveMarketData>("live_market_data");
+  if (cached) return cached;
+
+  const tickers = [...NSE_INDICES.map((i) => i.ticker), ...getYahooTickers()];
+  const quotes = await fetchYahooQuotes(tickers);
+
+  const indices: IndexData[] = NSE_INDICES.filter((i) => quotes[i.ticker]).map((i) => {
+    const q = quotes[i.ticker];
+    const price = (q.regularMarketPrice as number) ?? 0;
+    const prevClose = (q.regularMarketPreviousClose as number) ?? price;
+    const change = price - prevClose;
+    return {
+      name: i.name,
+      value: price,
+      change: Math.round(change * 100) / 100,
+      changePercent: prevClose ? Math.round((change / prevClose) * 10000) / 100 : 0,
+      high: (q.regularMarketDayHigh as number) ?? price,
+      low: (q.regularMarketDayLow as number) ?? price,
+      open: (q.regularMarketOpen as number) ?? prevClose,
+      prevClose,
+      volume: (q.regularMarketVolume as number) ?? 0,
+      timestamp: new Date().toISOString()
+    };
+  });
+
+  const quotesList: LiveQuote[] = ALL_STOCKS.filter((s) => quotes[s.yahooTicker]).map(
+    (s) => {
+      const q = quotes[s.yahooTicker];
+      const price = (q.regularMarketPrice as number) ?? 0;
+      const prevClose = (q.regularMarketPreviousClose as number) ?? price;
+      const change = price - prevClose;
+      return {
+        symbol: s.symbol,
+        name: s.name,
+        sector: s.sector,
+        price: Math.round(price * 100) / 100,
+        change: Math.round(change * 100) / 100,
+        changePercent: prevClose ? Math.round((change / prevClose) * 10000) / 100 : 0,
+        volume: (q.regularMarketVolume as number) ?? 0,
+        high: (q.regularMarketDayHigh as number) ?? price,
+        low: (q.regularMarketDayLow as number) ?? price
+      };
+    }
+  );
+
+  const sortedByChange = [...quotesList].sort((a, b) => b.changePercent - a.changePercent);
+
+  const result: LiveMarketData = {
+    source: "yahoo",
+    isMarketOpen: getMarketStatus(quotes["^NSEI"]) === "OPEN",
+    indices,
+    quotes: quotesList,
+    topGainers: sortedByChange.slice(0, 5),
+    topLosers: sortedByChange.slice(-5).reverse(),
+    updatedAt: new Date().toISOString()
+  };
+
+  setCache("live_market_data", result, LIVE_CACHE_TTL);
   return result;
 }

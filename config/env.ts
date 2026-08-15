@@ -20,11 +20,17 @@ const envSchema = z.object({
   GEMINI_MODEL: z.string().min(1).default("gemini-3.6-flash"),
   BUY_SCAN_MIN_CHANGE_PERCENT: z.coerce.number().min(0).default(1),
   BUY_SCAN_MIN_VOLUME: z.coerce.number().min(0).default(30_000),
-  // Price band for buy-scan candidates (this account trades ₹50–₹150 stocks).
-  BUY_SCAN_MIN_PRICE: z.coerce.number().min(0).default(50),
+  // Price band for buy-scan candidates (this account trades ₹40–₹150 stocks).
+  BUY_SCAN_MIN_PRICE: z.coerce.number().min(0).default(40),
   BUY_SCAN_MAX_PRICE: z.coerce.number().min(0).default(150),
   // How many best picks the daily scan notifies (top-N across the watchlist).
-  BUY_SCAN_TOP_PICKS: z.coerce.number().min(1).max(10).default(3),
+  BUY_SCAN_TOP_PICKS: z.coerce.number().min(1).max(10).default(5),
+  // Trade-plan defaults used to enrich buy notifications: stop loss and
+  // target as % from the entry price, and the max rupees to deploy per trade
+  // when no monthly capital setup exists (otherwise maxTradeCapital is used).
+  BUY_SCAN_STOP_LOSS_PERCENT: z.coerce.number().min(0).default(3),
+  BUY_SCAN_TARGET_PERCENT: z.coerce.number().min(0).default(7),
+  BUY_SCAN_DEFAULT_CAPITAL: z.coerce.number().min(0).default(10_000),
   // "yahoo" works from any host (Vercel included); "angelone" is real-time
   // but its WAF blocks cloud/datacenter IPs, so it only works from a
   // residential IP.

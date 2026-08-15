@@ -9,8 +9,9 @@ Single-user backend for a personal Indian stock-market AI assistant.
 - Sends push notifications through Firebase Admin SDK.
 - Exposes portfolio, recommendation, notification, capital, and market summary APIs.
 - Defines weekday cron jobs for:
-  - 12:00 PM IST buy scan: `/api/cron/scan?batch=all` (scans all batches and pushes buy signals)
+  - 12:00 PM IST buy scan: `/api/cron/scan?batch=all` (scans all batches, picks the top 5 in the ₹40–₹150 band, and pushes buy signals)
   - 2:00 PM IST portfolio/sell scan: `/api/cron/check-positions` (stop-loss / profit alerts)
+- Serves live watchlist quotes (poll `/api/market/live` or stream `/api/market/stream`) so the app's digits update like Angel One's feed.
 
 ## Stack
 
@@ -64,6 +65,8 @@ http://localhost:3000/api
 
 - `GET /api/health`
 - `GET /api/market/summary`
+- `GET /api/market/live` — fresh watchlist + index quotes (cached ~5s); poll every few seconds for moving digits
+- `GET /api/market/stream` — Server-Sent Events stream pushing the live snapshot every 5s
 - `GET /api/portfolio`
 - `GET /api/recommendations?status=pending&action=buy`
 - `GET /api/notifications`
@@ -78,7 +81,7 @@ http://localhost:3000/api
 
 `vercel.json` schedules weekday jobs in UTC (both fit on the Hobby plan's daily limit):
 
-- `30 6 * * 1-5` → `/api/cron/scan?batch=all` = 12:00 PM IST buy scan
+- `30 6 * * 1-5` → `/api/cron/scan?batch=all` = 12:00 PM IST buy scan (top 5 picks, ₹40–₹150 band)
 - `30 8 * * 1-5` → `/api/cron/check-positions` = 2:00 PM IST sell scan
 
 Set `CRON_SECRET` in Vercel — cron invocations then arrive with `Authorization: Bearer <CRON_SECRET>` and are auto-validated.
@@ -92,4 +95,9 @@ You can also trigger the buy scan manually at any time: `GET /api/cron/scan?batc
   - `angelone` — real-time NSE data, but Angel One's WAF blocks cloud/datacenter IPs, so this only works when the backend runs from a residential IP. If you see `Request Rejected` errors from Angel One, that's this.
 - `BUY_SCAN_MIN_CHANGE_PERCENT` (default `1`) — minimum intraday % gain for a candidate.
 - `BUY_SCAN_MIN_VOLUME` (default `30000`) — minimum volume for a candidate.
+- `BUY_SCAN_MIN_PRICE` (default `40`) / `BUY_SCAN_MAX_PRICE` (default `150`) — price band for candidates.
+- `BUY_SCAN_TOP_PICKS` (default `5`) — how many best picks the daily 12:00 PM scan notifies.
+- `BUY_SCAN_STOP_LOSS_PERCENT` (default `3`) — stop loss as % below the entry price in buy notifications.
+- `BUY_SCAN_TARGET_PERCENT` (default `7`) — target as % above the entry price in buy notifications.
+- `BUY_SCAN_DEFAULT_CAPITAL` (default `10000`) — rupees per trade used to size quantity when no monthly setup exists (otherwise the setup's `maxTradeCapital` is used).
 - `GEMINI_MODEL` (default `gemini-3.6-flash`) — AI model used to pick the best signal; falls back to `gemini-2.5-flash` on failure.

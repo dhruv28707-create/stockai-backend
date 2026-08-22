@@ -86,7 +86,7 @@ export async function getNotificationTokenStatus(): Promise<{
 
 // Human-readable IST label (e.g. "16 Aug 2026, 4:05 PM") so the app can show
 // a concrete time instead of a vague relative one like "just now".
-function getISTTimestampLabel(date = new Date()): string {
+export function getISTTimestampLabel(date = new Date()): string {
   return new Intl.DateTimeFormat("en-IN", {
     timeZone: "Asia/Kolkata",
     day: "2-digit",
@@ -168,7 +168,7 @@ export async function sendPushNotification(
       body,
       channel: "fcm",
       status: "sent",
-      deviceToken: token,
+      tokenPrefix: getTokenPrefix(token),
       messageId,
       metadata,
       ...timestampData,
@@ -196,7 +196,7 @@ export async function sendPushNotification(
       body,
       channel: "fcm",
       status: "failed",
-      deviceToken: token,
+      tokenPrefix: getTokenPrefix(token),
       errorMessage,
       errorCode,
       metadata,

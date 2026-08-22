@@ -1,5 +1,11 @@
-import "dotenv/config";
+import { config } from "dotenv";
 import { z } from "zod";
+
+// Load ".env" first, then ".env.local" (Vercel CLI convention) as an override,
+// so `npm run dev` works whether secrets live in ".env" or were pulled from
+// Vercel into ".env.local".
+config();
+config({ path: ".env.local", override: true });
 
 const envSchema = z.object({
   NODE_ENV: z.enum(["development", "test", "production"]).default("development"),
@@ -17,7 +23,7 @@ const envSchema = z.object({
   ANGEL_ONE_CLIENT_ID: z.string().min(1).optional(),
   ANGEL_ONE_API_KEY: z.string().min(1).optional(),
   GEMINI_API_KEY: z.string().min(1).optional(),
-  GEMINI_MODEL: z.string().min(1).default("gemini-3.6-flash"),
+  GEMINI_MODEL: z.string().min(1).default("gemini-2.5-flash"),
   BUY_SCAN_MIN_CHANGE_PERCENT: z.coerce.number().min(0).default(1),
   BUY_SCAN_MIN_VOLUME: z.coerce.number().min(0).default(30_000),
   // Price band for buy-scan candidates (this account trades ₹40–₹150 stocks).

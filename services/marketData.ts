@@ -300,12 +300,29 @@ export interface LiveMarketData {
  * /api/market/live (or subscribe to /api/market/stream) every few seconds.
  * Only the watchlist (33 stocks) + 2 indices are fetched, so it's far
  * cheaper than the full /api/market/summary (which covers ~110 movers).
+ *
+ * `extraSymbols` merges the user's wishlist stocks into the snapshot so the
+ * Market Tab can render them with live movement alongside the watchlist.
  */
-export async function getLiveMarketData(): Promise<LiveMarketData> {
-  const cached = getCached<LiveMarketData>("live_market_data");
+export async function getLiveMarketData(
+  extraSymbols?: string[]
+): Promise<LiveMarketData> {
+  const normalizedExtra = normalizeExtraSymbols(extraSymbols);
+  const cacheKey = `live_market_data:${normalizedExtra.join(",")}`;
+  const cached = getCached<LiveMarketData>(cacheKey);
   if (cached) return cached;
 
-  const tickers = [...NSE_INDICES.map((i) => i.ticker), ...getYahooTickers()];
+  const watchlistTickers = getYahooTickers();
+  const watchlistSet = new Set(watchlistTickers);
+  const extraTickers = normalizedExtra
+    .map((symbol) => `${symbol}.NS`)
+    .filter((ticker) => !watchlistSet.has(ticker));
+
+  const tickers = [
+    ...NSE_INDICES.map((i) => i.ticker),
+    ...watchlistTickers,
+    ...extraTickers
+  ];
   const quotes = await fetchYahooQuotes(tickers);
 
   const indices: IndexData[] = NSE_INDICES.filter((i) => quotes[i.ticker]).map((i) => {
@@ -330,22 +347,26 @@ export async function getLiveMarketData(): Promise<LiveMarketData> {
   const quotesList: LiveQuote[] = ALL_STOCKS.filter((s) => quotes[s.yahooTicker]).map(
     (s) => {
       const q = quotes[s.yahooTicker];
-      const price = (q.regularMarketPrice as number) ?? 0;
-      const prevClose = (q.regularMarketPreviousClose as number) ?? price;
-      const change = price - prevClose;
-      return {
-        symbol: s.symbol,
-        name: s.name,
-        sector: s.sector,
-        price: Math.round(price * 100) / 100,
-        change: Math.round(change * 100) / 100,
-        changePercent: prevClose ? Math.round((change / prevClose) * 10000) / 100 : 0,
-        volume: (q.regularMarketVolume as number) ?? 0,
-        high: (q.regularMarketDayHigh as number) ?? price,
-        low: (q.regularMarketDayLow as number) ?? price
-      };
+      return toLiveQuote(s.symbol, s.name, s.sector, q);
     }
   );
+
+  const extraSet = new Set(normalizedExtra);
+  for (const ticker of extraTickers) {
+    const q = quotes[ticker];
+    if (!q) continue;
+    const symbol = ticker.replace(/\.NS$/, "");
+    if (extraSet.has(symbol)) {
+      quotesList.push(
+        toLiveQuote(
+          symbol,
+          String(q.shortName ?? q.longName ?? symbol),
+          "Wishlist",
+          q
+        )
+      );
+    }
+  }
 
   const sortedByChange = [...quotesList].sort((a, b) => b.changePercent - a.changePercent);
 
@@ -359,6 +380,36 @@ export async function getLiveMarketData(): Promise<LiveMarketData> {
     updatedAt: new Date().toISOString()
   };
 
-  setCache("live_market_data", result, LIVE_CACHE_TTL);
+  setCache(cacheKey, result, LIVE_CACHE_TTL);
   return result;
+}
+
+function normalizeExtraSymbols(symbols?: string[]): string[] {
+  if (!Array.isArray(symbols)) return [];
+  const cleaned = symbols
+    .map((s) => String(s ?? "").trim().toUpperCase().replace(/\.NS$/, ""))
+    .filter((s) => /^[A-Z0-9&\-.]{1,20}$/.test(s));
+  return [...new Set(cleaned)];
+}
+
+function toLiveQuote(
+  symbol: string,
+  name: string,
+  sector: string,
+  q: Record<string, unknown>
+): LiveQuote {
+  const price = (q.regularMarketPrice as number) ?? 0;
+  const prevClose = (q.regularMarketPreviousClose as number) ?? price;
+  const change = price - prevClose;
+  return {
+    symbol,
+    name,
+    sector,
+    price: Math.round(price * 100) / 100,
+    change: Math.round(change * 100) / 100,
+    changePercent: prevClose ? Math.round((change / prevClose) * 10000) / 100 : 0,
+    volume: (q.regularMarketVolume as number) ?? 0,
+    high: (q.regularMarketDayHigh as number) ?? price,
+    low: (q.regularMarketDayLow as number) ?? price
+  };
 }

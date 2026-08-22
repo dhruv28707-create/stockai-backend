@@ -7,7 +7,8 @@ export const collectionNames = {
   monthlySetup: "monthlySetup",
   // Same-day notification dedup keys + daily scan run-guard markers.
   // Survives Vercel cold starts (unlike in-memory state).
-  cronState: "cronState"
+  cronState: "cronState",
+  wishlist: "wishlist"
 } as const;
 
 export type RiskLevel = "low" | "medium" | "high";

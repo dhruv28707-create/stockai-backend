@@ -12,6 +12,7 @@ import {
   sendPushNotification
 } from "../services/fcm";
 import { getLiveMarketData, getMarketSummary, getYahooScanQuotes } from "../services/marketData";
+import { getISTTimestampLabel } from "../services/fcm";
 import {
   getAngelOneMarketSummary,
   getQuotes,
@@ -32,6 +33,11 @@ import { logger, toErrorContext } from "../utils/logger";
 import rateLimit from "express-rate-limit";
 
 const app = express();
+
+// Behind Vercel/NGINX proxies req.ip comes from X-Forwarded-For; without this
+// express-rate-limit either trusts a spoofable header or throws validation
+// errors on every request.
+app.set("trust proxy", 1);
 
 app.use(
   cors({
@@ -56,7 +62,7 @@ app.use(limiter);
 app.get("/api", (_req: Request, res: Response) => {
   // Version is a deployment fingerprint: check /api after deploying to confirm
   // the latest build is live.
-  sendSuccess(res, { service: "StockAI Backend", storage: "firebase", version: "1.6.1" });
+  sendSuccess(res, { service: "StockAI Backend", storage: "firebase", version: "1.7.0" });
 });
 
 app.get("/api/health", (_req: Request, res: Response) => {
@@ -75,11 +81,105 @@ app.get("/api/market/summary", async (_req: Request, res: Response) => {
 
 // Live watchlist snapshot for the app's "moving digits" ticker. Poll this
 // every few seconds (the response itself is cached for ~5s server-side).
+// The user's saved wishlist stocks are merged into `quotes` so the Market Tab
+// shows them moving live alongside the scan watchlist.
 app.get("/api/market/live", async (_req: Request, res: Response) => {
   try {
-    sendSuccess(res, await getLiveMarketData());
+    sendSuccess(res, await getLiveMarketData(await getUserWishlistSymbols()));
   } catch (error) {
     sendError(res, 500, `Failed to fetch live market data: ${getErrorMessage(error)}`);
+  }
+});
+
+// ─── Wishlist ─────────────────────────────────────────────────────────────────
+
+const WISHLIST_LIMIT = 30;
+const VALID_SYMBOL = /^[A-Z0-9&\-.]{1,20}$/;
+
+app.get("/api/market/wishlist", async (_req: Request, res: Response) => {
+  try {
+    const symbols = await getUserWishlistSymbols();
+    if (symbols.length === 0) {
+      sendSuccess(res, { items: [], count: 0 });
+      return;
+    }
+
+    const live = await getLiveMarketData(symbols);
+    const wanted = new Set(symbols);
+    const items = live.quotes.filter((q) => wanted.has(q.symbol));
+
+    sendSuccess(res, { items, count: items.length, updatedAt: live.updatedAt });
+  } catch (error) {
+    logger.error("[wishlist] Failed to fetch", toErrorContext(error));
+    sendError(res, 500, "Failed to fetch wishlist");
+  }
+});
+
+app.post("/api/market/wishlist", async (req: Request, res: Response) => {
+  try {
+    const symbol = String(req.body?.symbol ?? "").trim().toUpperCase();
+
+    if (!VALID_SYMBOL.test(symbol)) {
+      sendError(res, 400, "A valid NSE stock symbol is required");
+      return;
+    }
+
+    // Verify the symbol actually resolves on Yahoo before persisting it.
+    const quotes = await getYahooScanQuotes([`${symbol}.NS`]);
+    if (!quotes[symbol]) {
+      sendError(res, 404, `Symbol ${symbol} not found on NSE`);
+      return;
+    }
+
+    const existing = await getUserWishlistSymbols();
+    if (existing.includes(symbol)) {
+      sendSuccess(res, { added: false, symbol, message: "Already in wishlist" });
+      return;
+    }
+    if (existing.length >= WISHLIST_LIMIT) {
+      sendError(res, 400, `Wishlist is full (max ${WISHLIST_LIMIT} stocks)`);
+      return;
+    }
+
+    const docId = `${env.SINGLE_USER_ID}_${symbol}`;
+    await getDb()
+      .collection(collectionNames.wishlist)
+      .doc(docId)
+      .set(
+        {
+          id: docId,
+          userId: env.SINGLE_USER_ID,
+          symbol,
+          createdAt: Timestamp.now(),
+          updatedAt: Timestamp.now()
+        },
+        { merge: true }
+      );
+
+    sendSuccess(res, { added: true, symbol });
+  } catch (error) {
+    logger.error("[wishlist] Failed to add", toErrorContext(error));
+    sendError(res, 500, "Failed to add to wishlist");
+  }
+});
+
+app.delete("/api/market/wishlist/:symbol", async (req: Request, res: Response) => {
+  try {
+    const symbol = String(req.params.symbol ?? "").trim().toUpperCase();
+    if (!VALID_SYMBOL.test(symbol)) {
+      sendError(res, 400, "A valid stock symbol is required");
+      return;
+    }
+
+    await getDb()
+      .collection(collectionNames.wishlist)
+      .doc(`${env.SINGLE_USER_ID}_${symbol}`)
+      .delete();
+
+    sendSuccess(res, { removed: true, symbol });
+  } catch (error) {
+    logger.error("[wishlist] Failed to remove", toErrorContext(error));
+    sendError(res, 500, "Failed to remove from wishlist");
   }
 });
 
@@ -110,7 +210,7 @@ app.get("/api/market/stream", async (req: Request, res: Response) => {
 
   const pushLive = async () => {
     try {
-      send("update", await getLiveMarketData());
+      send("update", await getLiveMarketData(await getUserWishlistSymbols()));
     } catch (error) {
       send("error", { message: getErrorMessage(error) });
     }
@@ -171,7 +271,7 @@ app.get("/api/recommendations", async (req: Request, res: Response) => {
     if (status) query = query.where("status", "==", status);
     if (action) query = query.where("action", "==", action);
 
-    const snap = await query.orderBy("createdAt", "desc").limit(limit).get();
+    const snap = await fetchDocsSortedByCreatedAt(query, limit);
     const items = snap.docs
       .map((doc) => normalizeDoc(doc.id, doc.data()))
       .filter((item) => {
@@ -332,8 +432,10 @@ app.get("/api/notifications", async (req: Request, res: Response) => {
 
     if (status) query = query.where("status", "==", status);
 
-    const snap = await query.orderBy("createdAt", "desc").limit(limit).get();
-    const items = snap.docs.map((doc) => normalizeDoc(doc.id, doc.data()));
+    const snap = await fetchDocsSortedByCreatedAt(query, limit);
+    const items = snap.docs
+      .map((doc) => normalizeDoc(doc.id, doc.data()))
+      .map(ensureNotificationTimestamps);
 
     sendSuccess(res, { items, count: items.length });
   } catch (error) {
@@ -974,9 +1076,11 @@ async function runBuyScanAll(): Promise<BuyScanResult[]> {
       if (allQuotes[s.symbol]) batchQuotes[s.symbol] = allQuotes[s.symbol];
     }
     if (Object.keys(batchQuotes).length === 0) {
-      const message = `No quotes returned for batch ${batch}`;
-      await logCronRun("buy_scan", batch, "failed", message);
-      return [{ status: "failed", message }];
+      // One batch with no quotes must not kill the whole daily scan — log and
+      // keep scanning the remaining batches.
+      logger.warn("[buy_scan] No quotes returned for batch — skipping batch", { batch });
+      await logCronRun("buy_scan", batch, "skipped", `No quotes returned for batch ${batch}`);
+      continue;
     }
     candidates.push(...buildBuyCandidates(batchStocks, batchQuotes));
   }
@@ -1118,6 +1222,85 @@ async function runSellScan(batchIndex: number): Promise<SellScanResult> {
 }
 
 // ─── Helpers ──────────────────────────────────────────────────────────────────
+
+/**
+ * Firestore requires a composite index for where("userId") + orderBy("createdAt").
+ * If that index is missing, the query throws failed-precondition and every list
+ * endpoint 500s. Fall back to an unsorted fetch + in-memory sort so the app
+ * keeps working, and log once so the index still gets created in the console.
+ */
+async function fetchDocsSortedByCreatedAt(
+  query: Query,
+  limit: number
+): Promise<{ docs: Array<{ id: string; data: () => DocumentData }> }> {
+  try {
+    return await query.orderBy("createdAt", "desc").limit(limit).get();
+  } catch (err) {
+    const code = getErrorCode(err);
+    const msg = getErrorMessage(err);
+    if (code !== "failed-precondition" && !msg.includes("index")) throw err;
+
+    logger.warn("[firestore] Composite index missing — falling back to in-memory sort", {
+      error: msg.slice(0, 200)
+    });
+    const snap = await query.limit(limit * 5).get();
+    const docs = snap.docs
+      .filter((doc) => doc.data().createdAt)
+      .sort((a, b) => {
+        const ta = a.data().createdAt?.toMillis?.() ?? 0;
+        const tb = b.data().createdAt?.toMillis?.() ?? 0;
+        return tb - ta;
+      })
+      .slice(0, limit);
+    return { docs };
+  }
+}
+
+/**
+ * Guarantees every notification item carries a renderable timestamp — ISO
+ * string, epoch ms and an IST label — even for legacy docs created before
+ * timestamp fields existed. Fixes the "no timestamp in the notification tab"
+ * issue without a data migration.
+ */
+function ensureNotificationTimestamps(item: Record<string, unknown>): Record<string, unknown> {
+  if (item.timestamp && item.timestampLabel && item.timestampMs) return item;
+
+  let date: Date | null = null;
+  for (const candidate of [item.timestamp, item.sentAt, item.createdAt]) {
+    if (typeof candidate === "string" && candidate) {
+      const parsed = new Date(candidate);
+      if (!Number.isNaN(parsed.getTime())) {
+        date = parsed;
+        break;
+      }
+    }
+  }
+  if (!date) return { ...item, timestamp: null, timestampLabel: null, timestampMs: null };
+
+  return {
+    ...item,
+    timestamp: date.toISOString(),
+    timestampLabel: getISTTimestampLabel(date),
+    timestampMs: date.getTime()
+  };
+}
+
+async function getUserWishlistSymbols(): Promise<string[]> {
+  try {
+    const snap = await getDb()
+      .collection(collectionNames.wishlist)
+      .where("userId", "==", env.SINGLE_USER_ID)
+      .get();
+    return snap.docs
+      .map((doc) => String(doc.data().symbol ?? "").trim().toUpperCase())
+      .filter(Boolean);
+  } catch (err) {
+    logger.warn("[wishlist] Read failed — continuing without wishlist", {
+      error: getErrorMessage(err)
+    });
+    return [];
+  }
+}
 
 function getCurrentMonth(): string {
   const parts = new Intl.DateTimeFormat("en-CA", {

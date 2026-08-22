@@ -28,11 +28,24 @@ export interface AIPick {
 // and keep a fallback in case a project can't reach the newest one.
 const FALLBACK_MODEL = "gemini-2.5-flash";
 const AI_TIMEOUT_MS = 20_000;
-const MAX_OUTPUT_TOKENS = 500;
+const MAX_OUTPUT_TOKENS = 1024;
 
 async function callGemini(model: string, prompt: string): Promise<string> {
   const controller = new AbortController();
   const timer = setTimeout(() => controller.abort(), AI_TIMEOUT_MS);
+
+  // Thinking-capable models (2.5+) spend thinking tokens from the same
+  // output budget — with a small cap the model could burn all 500 tokens
+  // "thinking" and return empty text, silently degrading every scan to
+  // rule-based picks. Disable thinking and give the JSON room to fit.
+  const supportsThinkingConfig = /\d+\.\d+/.test(model);
+  const generationConfig: Record<string, unknown> = {
+    temperature: 0.2,
+    maxOutputTokens: MAX_OUTPUT_TOKENS
+  };
+  if (supportsThinkingConfig) {
+    generationConfig.thinkingConfig = { thinkingBudget: 0 };
+  }
 
   try {
     const response = await fetch(
@@ -43,10 +56,7 @@ async function callGemini(model: string, prompt: string): Promise<string> {
         signal: controller.signal,
         body: JSON.stringify({
           contents: [{ parts: [{ text: prompt }] }],
-          generationConfig: {
-            temperature: 0.2,
-            maxOutputTokens: MAX_OUTPUT_TOKENS
-          }
+          generationConfig
         })
       }
     );

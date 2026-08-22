@@ -1,9 +1,5 @@
 import YahooFinance from "yahoo-finance2";
-import {
-  ALL_STOCKS,
-  getYahooTickers,
-  MARKET_MOVERS_TICKERS
-} from "../config/stocks";
+import { ALL_STOCKS, getYahooTickers, MARKET_MOVERS_TICKERS } from "../config/stocks";
 
 const yahooFinance = new YahooFinance();
 
@@ -173,10 +169,13 @@ export async function getYahooScanQuotes(
     }
     if (!Array.isArray(results)) continue;
 
-    results.forEach((q, j) => {
+    results.forEach((q) => {
       if (!q) return;
-      const returnedSymbol =
-        typeof q.symbol === "string" && q.symbol ? q.symbol : batch[j];
+      // Only trust the symbol Yahoo actually returned — falling back to the
+      // requested index mislabels quotes whenever Yahoo reorders/drops
+      // results, which fed wrong prices into the buy/sell scans.
+      const returnedSymbol = typeof q.symbol === "string" ? q.symbol : "";
+      if (!returnedSymbol) return;
       const cleanSymbol = returnedSymbol.replace(/\.NS$/, "").replace("-EQ", "");
       const price = (q.regularMarketPrice as number) ?? 0;
       const prevClose = (q.regularMarketPreviousClose as number) ?? price;
@@ -358,17 +357,14 @@ export async function getLiveMarketData(
     const symbol = ticker.replace(/\.NS$/, "");
     if (extraSet.has(symbol)) {
       quotesList.push(
-        toLiveQuote(
-          symbol,
-          String(q.shortName ?? q.longName ?? symbol),
-          "Wishlist",
-          q
-        )
+        toLiveQuote(symbol, String(q.shortName ?? q.longName ?? symbol), "Wishlist", q)
       );
     }
   }
 
-  const sortedByChange = [...quotesList].sort((a, b) => b.changePercent - a.changePercent);
+  const sortedByChange = [...quotesList].sort(
+    (a, b) => b.changePercent - a.changePercent
+  );
 
   const result: LiveMarketData = {
     source: "yahoo",
@@ -387,7 +383,12 @@ export async function getLiveMarketData(
 function normalizeExtraSymbols(symbols?: string[]): string[] {
   if (!Array.isArray(symbols)) return [];
   const cleaned = symbols
-    .map((s) => String(s ?? "").trim().toUpperCase().replace(/\.NS$/, ""))
+    .map((s) =>
+      String(s ?? "")
+        .trim()
+        .toUpperCase()
+        .replace(/\.NS$/, "")
+    )
     .filter((s) => /^[A-Z0-9&\-.]{1,20}$/.test(s));
   return [...new Set(cleaned)];
 }

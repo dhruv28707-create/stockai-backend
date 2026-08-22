@@ -23,18 +23,21 @@ export interface PushMetadata {
 }
 
 export async function registerDeviceToken(token: string): Promise<void> {
-  await getDb()
-    .collection(collectionNames.settings)
-    .doc(TOKEN_DOC_ID)
-    .set(
-      {
-        token,
-        tokenPrefix: getTokenPrefix(token),
-        tokenLength: token.length,
-        updatedAt: Timestamp.now()
-      },
-      { merge: true }
-    );
+  const ref = getDb().collection(collectionNames.settings).doc(TOKEN_DOC_ID);
+  const existing = await ref.get();
+  const now = Timestamp.now();
+
+  await ref.set(
+    {
+      token,
+      tokenPrefix: getTokenPrefix(token),
+      tokenLength: token.length,
+      // Preserve the original registration date on token refreshes.
+      ...(existing.exists ? {} : { createdAt: now }),
+      updatedAt: now
+    },
+    { merge: true }
+  );
 }
 
 export async function resolveDeviceToken(): Promise<string | null> {

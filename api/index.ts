@@ -11,7 +11,11 @@ import {
   registerDeviceToken,
   sendPushNotification
 } from "../services/fcm";
-import { getLiveMarketData, getMarketSummary, getYahooScanQuotes } from "../services/marketData";
+import {
+  getLiveMarketData,
+  getMarketSummary,
+  getYahooScanQuotes
+} from "../services/marketData";
 import { getISTTimestampLabel } from "../services/fcm";
 import {
   getAngelOneMarketSummary,
@@ -47,6 +51,13 @@ app.use(
   })
 );
 app.use(express.json());
+
+app.use((_req: Request, res: Response, next) => {
+  res.setHeader("X-Content-Type-Options", "nosniff");
+  res.setHeader("X-Frame-Options", "DENY");
+  res.setHeader("Referrer-Policy", "no-referrer");
+  next();
+});
 
 const limiter = rateLimit({
   windowMs: 60 * 1000,
@@ -117,7 +128,9 @@ app.get("/api/market/wishlist", async (_req: Request, res: Response) => {
 
 app.post("/api/market/wishlist", async (req: Request, res: Response) => {
   try {
-    const symbol = String(req.body?.symbol ?? "").trim().toUpperCase();
+    const symbol = String(req.body?.symbol ?? "")
+      .trim()
+      .toUpperCase();
 
     if (!VALID_SYMBOL.test(symbol)) {
       sendError(res, 400, "A valid NSE stock symbol is required");
@@ -142,19 +155,16 @@ app.post("/api/market/wishlist", async (req: Request, res: Response) => {
     }
 
     const docId = `${env.SINGLE_USER_ID}_${symbol}`;
-    await getDb()
-      .collection(collectionNames.wishlist)
-      .doc(docId)
-      .set(
-        {
-          id: docId,
-          userId: env.SINGLE_USER_ID,
-          symbol,
-          createdAt: Timestamp.now(),
-          updatedAt: Timestamp.now()
-        },
-        { merge: true }
-      );
+    await getDb().collection(collectionNames.wishlist).doc(docId).set(
+      {
+        id: docId,
+        userId: env.SINGLE_USER_ID,
+        symbol,
+        createdAt: Timestamp.now(),
+        updatedAt: Timestamp.now()
+      },
+      { merge: true }
+    );
 
     sendSuccess(res, { added: true, symbol });
   } catch (error) {
@@ -165,7 +175,9 @@ app.post("/api/market/wishlist", async (req: Request, res: Response) => {
 
 app.delete("/api/market/wishlist/:symbol", async (req: Request, res: Response) => {
   try {
-    const symbol = String(req.params.symbol ?? "").trim().toUpperCase();
+    const symbol = String(req.params.symbol ?? "")
+      .trim()
+      .toUpperCase();
     if (!VALID_SYMBOL.test(symbol)) {
       sendError(res, 400, "A valid stock symbol is required");
       return;
@@ -765,7 +777,13 @@ async function markKeyNotified(key: string): Promise<void> {
       .collection(collectionNames.cronState)
       .doc(`dedup_${getISTDateKey()}`)
       .set(
-        { keys: FieldValue.arrayUnion(key), updatedAt: Timestamp.now() },
+        {
+          keys: FieldValue.arrayUnion(key),
+          updatedAt: Timestamp.now(),
+          // TTL hint: enable a TTL policy on "expireAt" in the Firebase
+          // console so these daily docs clean themselves up.
+          expireAt: Timestamp.fromMillis(Date.now() + 7 * 24 * 60 * 60 * 1000)
+        },
         { merge: true }
       );
   } catch (err) {
@@ -812,7 +830,8 @@ async function markRunCompleted(
           status: "completed",
           completedAt: Timestamp.now(),
           message: message ?? null,
-          updatedAt: Timestamp.now()
+          updatedAt: Timestamp.now(),
+          expireAt: Timestamp.fromMillis(Date.now() + 7 * 24 * 60 * 60 * 1000)
         },
         { merge: true }
       );
@@ -1079,7 +1098,12 @@ async function runBuyScanAll(): Promise<BuyScanResult[]> {
       // One batch with no quotes must not kill the whole daily scan — log and
       // keep scanning the remaining batches.
       logger.warn("[buy_scan] No quotes returned for batch — skipping batch", { batch });
-      await logCronRun("buy_scan", batch, "skipped", `No quotes returned for batch ${batch}`);
+      await logCronRun(
+        "buy_scan",
+        batch,
+        "skipped",
+        `No quotes returned for batch ${batch}`
+      );
       continue;
     }
     candidates.push(...buildBuyCandidates(batchStocks, batchQuotes));
@@ -1108,9 +1132,13 @@ async function runBuyScanAll(): Promise<BuyScanResult[]> {
     results.push(await handleBuyPick(0, pick));
   }
 
-  // Only mark today's run as completed when nothing hard-failed — a partially
-  // failed scan stays eligible for a retry.
-  const failed = results.filter((r) => r.status === "failed").length;
+  // Only mark today's run as completed when nothing hard-failed AND at least
+  // one push actually went out — otherwise a later trigger can retry (e.g.
+  // after the device token gets re-registered). Firestore dedup still
+  // prevents any already-notified symbol from being pushed twice.
+  const failed = results.filter(
+    (r) => r.status === "failed" || r.pushSent === false
+  ).length;
   if (failed === 0) {
     const notified = results.filter((r) => r.notified).length;
     await markRunCompleted("buy_scan", `${results.length} picks, ${notified} notified`);
@@ -1262,7 +1290,9 @@ async function fetchDocsSortedByCreatedAt(
  * timestamp fields existed. Fixes the "no timestamp in the notification tab"
  * issue without a data migration.
  */
-function ensureNotificationTimestamps(item: Record<string, unknown>): Record<string, unknown> {
+function ensureNotificationTimestamps(
+  item: Record<string, unknown>
+): Record<string, unknown> {
   if (item.timestamp && item.timestampLabel && item.timestampMs) return item;
 
   let date: Date | null = null;
@@ -1292,7 +1322,11 @@ async function getUserWishlistSymbols(): Promise<string[]> {
       .where("userId", "==", env.SINGLE_USER_ID)
       .get();
     return snap.docs
-      .map((doc) => String(doc.data().symbol ?? "").trim().toUpperCase())
+      .map((doc) =>
+        String(doc.data().symbol ?? "")
+          .trim()
+          .toUpperCase()
+      )
       .filter(Boolean);
   } catch (err) {
     logger.warn("[wishlist] Read failed — continuing without wishlist", {
@@ -1481,6 +1515,12 @@ async function logCronRun(
 
 process.on("unhandledRejection", (reason) => {
   logger.error("[unhandledRejection]", toErrorContext(reason));
+});
+
+// Unknown routes must return JSON, not Express's default HTML 404 — mobile
+// clients parsing JSON would crash on it.
+app.use((_req: Request, res: Response) => {
+  sendError(res, 404, "Route not found");
 });
 
 app.use((err: Error, _req: Request, res: Response, _next) => {

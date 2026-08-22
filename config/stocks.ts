@@ -95,12 +95,32 @@ const RAW_STOCKS: { symbol: string; name: string; sector: string }[] = [
 
   // Media & Broadcasting
   { symbol: "GTPL", name: "GTPL Hathway", sector: "Media & Broadcasting" },
-  { symbol: "ZEEL", name: "Zee Entertainment Enterprises", sector: "Media & Broadcasting" },
+  {
+    symbol: "ZEEL",
+    name: "Zee Entertainment Enterprises",
+    sector: "Media & Broadcasting"
+  },
   { symbol: "INOXWIND", name: "Inox Wind", sector: "Power & Utilities" },
-  { symbol: "UJJIVANSFB", name: "Ujjivan Small Finance Bank", sector: "Banking & Financial Services" },
-  { symbol: "EQUITASBNK", name: "Equitas Small Finance Bank", sector: "Banking & Financial Services" },
-  { symbol: "SOUTHBANK", name: "The South Indian Bank", sector: "Banking & Financial Services" },
-  { symbol: "SANGHIIND", name: "Sanghi Industries", sector: "Cement & Building Materials" },
+  {
+    symbol: "UJJIVANSFB",
+    name: "Ujjivan Small Finance Bank",
+    sector: "Banking & Financial Services"
+  },
+  {
+    symbol: "EQUITASBNK",
+    name: "Equitas Small Finance Bank",
+    sector: "Banking & Financial Services"
+  },
+  {
+    symbol: "SOUTHBANK",
+    name: "The South Indian Bank",
+    sector: "Banking & Financial Services"
+  },
+  {
+    symbol: "SANGHIIND",
+    name: "Sanghi Industries",
+    sector: "Cement & Building Materials"
+  },
 
   // Real Estate
   { symbol: "SHRIRAMPPS", name: "Shriram Properties", sector: "Real Estate" }

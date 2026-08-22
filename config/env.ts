@@ -24,6 +24,10 @@ const envSchema = z.object({
   ANGEL_ONE_API_KEY: z.string().min(1).optional(),
   GEMINI_API_KEY: z.string().min(1).optional(),
   GEMINI_MODEL: z.string().min(1).default("gemini-2.5-flash"),
+  // Emergency AI fallback: when every Gemini attempt fails, Qwen (via
+  // OpenRouter's OpenAI-compatible API) is tried before rule-based picks.
+  OPENROUTER_API_KEY: z.string().min(1).optional(),
+  QWEN_MODEL: z.string().min(1).default("qwen/qwen-2.5-3b-instruct"),
   BUY_SCAN_MIN_CHANGE_PERCENT: z.coerce.number().min(0).default(1),
   BUY_SCAN_MIN_VOLUME: z.coerce.number().min(0).default(30_000),
   // Price band for buy-scan candidates (this account trades ₹40–₹150 stocks).

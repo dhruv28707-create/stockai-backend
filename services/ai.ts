@@ -79,6 +79,52 @@ async function callGemini(model: string, prompt: string): Promise<string> {
 }
 
 /**
+ * Emergency AI fallback via OpenRouter's OpenAI-compatible API (Qwen).
+ * Used only when every Gemini attempt fails, so a Gemini outage or quota
+ * exhaustion degrades to a weaker model instead of dumb rule-based picks.
+ */
+async function callOpenRouter(model: string, prompt: string): Promise<string> {
+  if (!env.OPENROUTER_API_KEY) {
+    throw new Error("OPENROUTER_API_KEY is not configured");
+  }
+
+  const controller = new AbortController();
+  const timer = setTimeout(() => controller.abort(), AI_TIMEOUT_MS);
+
+  try {
+    const response = await fetch("https://openrouter.ai/api/v1/chat/completions", {
+      method: "POST",
+      headers: {
+        "Content-Type": "application/json",
+        Authorization: `Bearer ${env.OPENROUTER_API_KEY}`
+      },
+      signal: controller.signal,
+      body: JSON.stringify({
+        model,
+        temperature: 0.2,
+        max_tokens: MAX_OUTPUT_TOKENS,
+        messages: [{ role: "user", content: prompt }]
+      })
+    });
+
+    if (!response.ok) {
+      const body = await response.text();
+      throw new Error(
+        `OpenRouter ${model} returned ${response.status}: ${body.slice(0, 200)}`
+      );
+    }
+
+    const data = (await response.json()) as {
+      choices?: Array<{ message?: { content?: string } }>;
+    };
+
+    return data.choices?.[0]?.message?.content?.trim() ?? "";
+  } finally {
+    clearTimeout(timer);
+  }
+}
+
+/**
  * Extracts the first JSON value from a model response. Multi-pick replies are
  * arrays (`[ {...}, {...} ]`), single picks are objects — handle both, and
  * tolerate markdown fences and surrounding prose.
@@ -212,29 +258,52 @@ Rules:
 - ALWAYS pick the best available candidate. Return null ONLY if every single candidate is genuinely weak (e.g. all moves are negligible or volume has collapsed).
 ${responseInstruction}`;
 
-  if (!env.GEMINI_API_KEY) {
+  if (!env.GEMINI_API_KEY && !env.OPENROUTER_API_KEY) {
     return ruleBasedPicks(candidates, type, safeCount);
   }
 
   const model = env.GEMINI_MODEL;
 
-  const attempts = [model];
-  if (model !== FALLBACK_MODEL) attempts.push(FALLBACK_MODEL);
+  interface Attempt {
+    label: string;
+    run: () => Promise<string>;
+  }
+
+  const attempts: Attempt[] = [];
+  if (env.GEMINI_API_KEY) {
+    attempts.push({ label: `gemini:${model}`, run: () => callGemini(model, prompt) });
+    if (model !== FALLBACK_MODEL) {
+      attempts.push({
+        label: `gemini:${FALLBACK_MODEL}`,
+        run: () => callGemini(FALLBACK_MODEL, prompt)
+      });
+    }
+  }
+  // Last AI chance before rule-based picks: Qwen via OpenRouter.
+  if (env.OPENROUTER_API_KEY) {
+    attempts.push({
+      label: `qwen:${env.QWEN_MODEL}`,
+      run: () => callOpenRouter(env.QWEN_MODEL, prompt)
+    });
+  }
 
   for (const attempt of attempts) {
     try {
-      const text = await callGemini(attempt, prompt);
+      const text = await attempt.run();
       if (!text || text === "null") return [];
 
       const picks = toAIPicks(extractJson(text), safeCount);
-      if (picks.length > 0) return picks;
+      if (picks.length > 0) {
+        logger.info(`[analyzeWithAI] Picks produced by ${attempt.label}`);
+        return picks;
+      }
 
-      logger.warn(`[analyzeWithAI] Unparseable response from ${attempt}`, {
+      logger.warn(`[analyzeWithAI] Unparseable response from ${attempt.label}`, {
         text: text.slice(0, 300)
       });
       continue;
     } catch (err) {
-      logger.error(`[analyzeWithAI] ${attempt} failed`, {
+      logger.error(`[analyzeWithAI] ${attempt.label} failed`, {
         error: getErrorMessage(err)
       });
     }

@@ -449,10 +449,197 @@ app.get("/api/notifications", async (req: Request, res: Response) => {
       .map((doc) => normalizeDoc(doc.id, doc.data()))
       .map(ensureNotificationTimestamps);
 
-    sendSuccess(res, { items, count: items.length });
+    // Mark which notifications the user has already acted on: a BUY_ALERT
+    // whose symbol has an open position is "bought". The app uses this when
+    // expanding the notification to show "Bought ✓" instead of a Buy button.
+    const openPositionIds = await getOpenPositionIdsBySymbol();
+    const enrichedItems = items.map((item) => {
+      const symbol = typeof item.symbol === "string" ? item.symbol : "";
+      const positionId = symbol ? openPositionIds.get(symbol) : undefined;
+      return {
+        ...item,
+        isBought: Boolean(positionId),
+        positionId: positionId ?? null
+      };
+    });
+
+    sendSuccess(res, { items: enrichedItems, count: enrichedItems.length });
   } catch (error) {
     logger.error("[notifications] Failed to fetch list", toErrorContext(error));
     sendError(res, 500, "Failed to fetch notifications");
+  }
+});
+
+// ─── Trades (Trade tab) ──────────────────────────────────────────────────────
+
+app.get("/api/trades", async (_req: Request, res: Response) => {
+  try {
+    const snap = await getDb()
+      .collection(collectionNames.positions)
+      .where("userId", "==", env.SINGLE_USER_ID)
+      .get();
+    const items = snap.docs
+      .map((doc) => normalizeDoc(doc.id, doc.data()))
+      .sort((a, b) => String(b.createdAt ?? "").localeCompare(String(a.createdAt ?? "")));
+
+    sendSuccess(res, {
+      items,
+      count: items.length,
+      openCount: items.filter((t) => t.status === "open").length
+    });
+  } catch (error) {
+    logger.error("[trades] Failed to fetch", toErrorContext(error));
+    sendError(res, 500, "Failed to fetch trades");
+  }
+});
+
+/**
+ * Record a stock purchase coming from a buy notification (or manual entry):
+ *   1. Creates an open position → shows up in the Trade tab (/api/trades)
+ *      and in the portfolio (/api/portfolio openPositions).
+ *   2. Appends/refreshes the holding on the portfolio document.
+ *   3. Deducts the invested amount from the month's remaining capital.
+ *   4. Marks the recommendation "executed" and the notification "bought".
+ * Idempotent per symbol: an already-open position is returned as-is instead
+ * of being duplicated.
+ */
+app.post("/api/trade/buy", async (req: Request, res: Response) => {
+  try {
+    const symbol = String(req.body?.symbol ?? "")
+      .trim()
+      .toUpperCase();
+    if (!VALID_SYMBOL.test(symbol)) {
+      sendError(res, 400, "A valid stock symbol is required");
+      return;
+    }
+
+    const quantity = Math.floor(toPositiveNumber(req.body?.quantity, 0));
+    const entryPrice = toPositiveNumber(
+      req.body?.entryPrice ?? req.body?.price ?? req.body?.currentPrice,
+      0
+    );
+    if (!quantity || !entryPrice) {
+      sendError(res, 400, "Valid quantity and entry price are required");
+      return;
+    }
+
+    // Idempotency: never open a second position for a symbol already held.
+    const existingSnap = await getDb()
+      .collection(collectionNames.positions)
+      .where("userId", "==", env.SINGLE_USER_ID)
+      .where("status", "==", "open")
+      .where("symbol", "==", symbol)
+      .limit(1)
+      .get();
+
+    if (!existingSnap.empty) {
+      const existing = normalizeDoc(existingSnap.docs[0].id, existingSnap.docs[0].data());
+      sendSuccess(res, {
+        bought: false,
+        alreadyOwned: true,
+        message: `${symbol} is already in your portfolio`,
+        position: existing
+      });
+      return;
+    }
+
+    const name = typeof req.body?.name === "string" ? req.body.name : symbol;
+    const stopLoss = toPositiveNumber(req.body?.stopLoss, 0) || null;
+    const target = toPositiveNumber(req.body?.target, 0) || null;
+    const expectedReturn = Number(req.body?.expectedReturn) || null;
+    const recommendationId =
+      typeof req.body?.recommendationId === "string" ? req.body.recommendationId : null;
+    const notificationId =
+      typeof req.body?.notificationId === "string" ? req.body.notificationId : null;
+
+    const now = Timestamp.now();
+    const investedAmount = Math.round(quantity * entryPrice * 100) / 100;
+
+    // 1. Open position (Trade tab + portfolio openPositions).
+    const positionRef = getDb().collection(collectionNames.positions).doc();
+    const positionData = {
+      id: positionRef.id,
+      userId: env.SINGLE_USER_ID,
+      symbol,
+      name,
+      quantity,
+      entryPrice,
+      stopLoss,
+      target,
+      expectedReturn,
+      investedAmount,
+      status: "open",
+      source: notificationId ? "notification" : "manual",
+      recommendationId,
+      notificationId,
+      entryDate: now,
+      createdAt: now,
+      updatedAt: now
+    };
+    await positionRef.set(positionData);
+
+    // 2. Portfolio document: holdings list + invested totals.
+    await addHoldingToPortfolio({
+      positionId: positionRef.id,
+      symbol,
+      name,
+      quantity,
+      entryPrice,
+      stopLoss,
+      target,
+      expectedReturn,
+      investedAmount,
+      boughtAt: now.toDate().toISOString()
+    });
+
+    // 3. Deduct from this month's remaining capital (never below zero).
+    const month = getCurrentMonth();
+    const setup = await getMonthlySetup(month);
+    if (setup) {
+      const remaining = Math.max(
+        0,
+        Number(setup.remainingCapital) - investedAmount
+      );
+      await getDb()
+        .collection(collectionNames.monthlySetup)
+        .doc(`${env.SINGLE_USER_ID}_${month}`)
+        .set(
+          { remainingCapital: remaining, updatedAt: Timestamp.now() },
+          { merge: true }
+        );
+    }
+
+    // 4. Flip the recommendation + notification to bought (best-effort).
+    if (recommendationId) {
+      await getDb()
+        .collection(collectionNames.recommendations)
+        .doc(recommendationId)
+        .set(
+          { status: "executed", executedPositionId: positionRef.id, updatedAt: Timestamp.now() },
+          { merge: true }
+        )
+        .catch(() => undefined);
+    }
+    if (notificationId) {
+      await getDb()
+        .collection(collectionNames.notifications)
+        .doc(notificationId)
+        .set(
+          { isBought: true, boughtPositionId: positionRef.id, updatedAt: Timestamp.now() },
+          { merge: true }
+        )
+        .catch(() => undefined);
+    }
+
+    sendSuccess(res, {
+      bought: true,
+      alreadyOwned: false,
+      message: `Bought ${quantity} ${symbol} @ ₹${entryPrice.toFixed(2)}`,
+      position: normalizeDoc(positionRef.id, positionData)
+    });
+  } catch (error) {
+    logger.error("[trade] Failed to record buy", toErrorContext(error));
+    sendError(res, 500, "Failed to record buy trade");
   }
 });
 
@@ -991,7 +1178,10 @@ async function handleBuyPick(batchIndex: number, pick: AIPick): Promise<BuyScanR
     updatedAt: Timestamp.now()
   });
 
-  // Send push notification with the full trade plan.
+  // Send push notification with the full trade plan. The plan fields are also
+  // stored in the notification history so expanding the notification in the
+  // app can render quantity / SL / target / expected profit, and the app can
+  // call POST /api/trade/buy with these ids to record the purchase.
   const push = await sendPushNotification(
     `📈 Buy Signal: ${pick.symbol}`,
     [
@@ -1001,7 +1191,18 @@ async function handleBuyPick(batchIndex: number, pick: AIPick): Promise<BuyScanR
     ].join("\n"),
     "BUY_ALERT",
     "HIGH",
-    pick.symbol
+    pick.symbol,
+    undefined,
+    {
+      recommendationId: recRef.id,
+      name: pick.name,
+      entryPrice: plan.entryPrice,
+      quantity: plan.quantity,
+      stopLoss: plan.stopLoss,
+      target: plan.target,
+      expectedReturn: plan.expectedReturn,
+      expectedReturnPercent: plan.expectedReturnPercent
+    }
   );
 
   // Only mark as notified once the push actually went out — a failed push
@@ -1315,8 +1516,76 @@ function ensureNotificationTimestamps(
   };
 }
 
-async function getUserWishlistSymbols(): Promise<string[]> {
+/**
+ * Map of symbol → position id for every open position, used to flag
+ * notifications as bought and to keep buys idempotent per symbol.
+ */
+async function getOpenPositionIdsBySymbol(): Promise<Map<string, string>> {
   try {
+    const snap = await getDb()
+      .collection(collectionNames.positions)
+      .where("userId", "==", env.SINGLE_USER_ID)
+      .where("status", "==", "open")
+      .get();
+    const map = new Map<string, string>();
+    for (const doc of snap.docs) {
+      const symbol = String(doc.data().symbol ?? "").toUpperCase();
+      if (symbol) map.set(symbol, doc.id);
+    }
+    return map;
+  } catch (err) {
+    // Fail-open: notifications still render, just without the bought flag.
+    logger.warn("[positions] Failed to map open positions", {
+      error: getErrorMessage(err)
+    });
+    return new Map();
+  }
+}
+
+/**
+ * Append (or refresh) a holding on the single portfolio document so the
+ * Portfolio tab can render bought stocks directly from `holdings`, alongside
+ * the openPositions list derived from the positions collection.
+ */
+async function addHoldingToPortfolio(holding: Record<string, unknown>): Promise<void> {
+  const snap = await getDb()
+    .collection(collectionNames.portfolio)
+    .where("userId", "==", env.SINGLE_USER_ID)
+    .limit(1)
+    .get();
+
+  const doc = snap.docs[0];
+  const ref = doc?.ref ?? getDb().collection(collectionNames.portfolio).doc();
+  const data = doc?.data() ?? {};
+
+  const symbol = String(holding.symbol ?? "");
+  const holdings = Array.isArray(data.holdings)
+    ? (data.holdings as Record<string, unknown>[]).filter(
+        (h) => String(h.symbol ?? "") !== symbol
+      )
+    : [];
+  holdings.push(holding);
+
+  const investedAmount =
+    Math.round(
+      holdings.reduce((sum, h) => sum + (Number(h.investedAmount) || 0), 0) * 100
+    ) / 100;
+
+  await ref.set(
+    {
+      id: ref.id,
+      userId: env.SINGLE_USER_ID,
+      holdings,
+      holdingsCount: holdings.length,
+      investedAmount,
+      updatedAt: Timestamp.now(),
+      ...(doc?.exists ? {} : { createdAt: Timestamp.now() })
+    },
+    { merge: true }
+  );
+}
+
+async function getUserWishlistSymbols(): Promise<string[]> {  try {
     const snap = await getDb()
       .collection(collectionNames.wishlist)
       .where("userId", "==", env.SINGLE_USER_ID)

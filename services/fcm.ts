@@ -20,6 +20,10 @@ export interface PushMetadata {
   priority: "HIGH" | "MEDIUM" | "LOW";
   symbol?: string;
   actionUrl?: string;
+  // Extra payload fields (e.g. the buy trade plan) merged into both the FCM
+  // data message and the Firestore notification history, indexed by
+  // [key: string]: unknown so callers can attach arbitrary plan fields.
+  [key: string]: unknown;
 }
 
 export async function registerDeviceToken(token: string): Promise<void> {
@@ -107,10 +111,17 @@ export async function sendPushNotification(
   type: string,
   priority: "HIGH" | "MEDIUM" | "LOW",
   symbol?: string,
-  actionUrl?: string
+  actionUrl?: string,
+  extraData?: Record<string, unknown>
 ): Promise<{ sent: boolean; hasToken: boolean; messageId?: string; error?: string }> {
   const token = await resolveDeviceToken();
-  const metadata: PushMetadata = { type, priority, symbol, actionUrl };
+  const metadata: PushMetadata = {
+    type,
+    priority,
+    symbol,
+    actionUrl,
+    ...(extraData ?? {})
+  };
   const channel = getNotificationChannel(type);
   const now = new Date();
 

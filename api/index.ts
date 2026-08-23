@@ -453,7 +453,7 @@ app.get("/api/notifications", async (req: Request, res: Response) => {
     // whose symbol has an open position is "bought". The app uses this when
     // expanding the notification to show "Bought ✓" instead of a Buy button.
     const openPositionIds = await getOpenPositionIdsBySymbol();
-    const enrichedItems = items.map((item) => {
+    const enrichedItems: Array<Record<string, unknown>> = items.map((item) => {
       const symbol = typeof item.symbol === "string" ? item.symbol : "";
       const positionId = symbol ? openPositionIds.get(symbol) : undefined;
       return {
@@ -462,6 +462,14 @@ app.get("/api/notifications", async (req: Request, res: Response) => {
         positionId: positionId ?? null
       };
     });
+
+    // Guaranteed newest-first order. Firestore's orderBy alone is not enough:
+    // legacy docs with missing/mixed-type createdAt values interleave dates
+    // (e.g. 17 Aug before 19 Aug), so re-sort deterministically by the
+    // enriched epoch timestamp before responding.
+    enrichedItems.sort(
+      (a, b) => (Number(b.timestampMs) || 0) - (Number(a.timestampMs) || 0)
+    );
 
     sendSuccess(res, { items: enrichedItems, count: enrichedItems.length });
   } catch (error) {
@@ -1487,9 +1495,13 @@ async function fetchDocsSortedByCreatedAt(
 
 /**
  * Guarantees every notification item carries a renderable timestamp — ISO
- * string, epoch ms and an IST label — even for legacy docs created before
- * timestamp fields existed. Fixes the "no timestamp in the notification tab"
- * issue without a data migration.
+ * string, epoch ms, an IST label and IST date-group fields — even for legacy
+ * docs created before timestamp fields existed. Fixes the "no timestamp in
+ * the notification tab" issue without a data migration.
+ *
+ * `dateKey` ("2026-08-19", IST) is a stable grouping key so the app can group
+ * notifications by day; `dateLabel` ("19 Aug 2026") is the ready-to-render
+ * section header for each group.
  */
 function ensureNotificationTimestamps(
   item: Record<string, unknown>
@@ -1506,13 +1518,37 @@ function ensureNotificationTimestamps(
       }
     }
   }
-  if (!date) return { ...item, timestamp: null, timestampLabel: null, timestampMs: null };
+  if (!date) {
+    return {
+      ...item,
+      timestamp: null,
+      timestampLabel: null,
+      timestampMs: null,
+      dateKey: null,
+      dateLabel: null
+    };
+  }
 
   return {
     ...item,
     timestamp: date.toISOString(),
     timestampLabel: getISTTimestampLabel(date),
-    timestampMs: date.getTime()
+    timestampMs: date.getTime(),
+    ...getISTDateGroup(date)
+  };
+}
+
+/** IST day grouping fields for a notification list: key + display label. */
+function getISTDateGroup(date: Date): { dateKey: string; dateLabel: string } {
+  const formatter = (options: Intl.DateTimeFormatOptions) =>
+    new Intl.DateTimeFormat("en-CA", { timeZone: "Asia/Kolkata", ...options });
+  return {
+    dateKey: formatter({
+      year: "numeric",
+      month: "2-digit",
+      day: "2-digit"
+    }).format(date),
+    dateLabel: formatter({ day: "numeric", month: "short", year: "numeric" }).format(date)
   };
 }
 

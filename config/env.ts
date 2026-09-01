@@ -35,6 +35,9 @@ const envSchema = z.object({
   BUY_SCAN_MAX_PRICE: z.coerce.number().min(0).default(150),
   // How many best picks the daily scan notifies (top-N across the watchlist).
   BUY_SCAN_TOP_PICKS: z.coerce.number().min(1).max(10).default(5),
+  // Number of trades per month to divide the maxTradeCapital across, ensuring
+  // the monthly budget sustains multiple opportunities instead of one large bet.
+  BUY_SCAN_TRADES_PER_MONTH: z.coerce.number().min(1).max(30).default(5),
   // Trade-plan defaults used to enrich buy notifications: stop loss and
   // target as % from the entry price, and the max rupees to deploy per trade
   // when no monthly capital setup exists (otherwise maxTradeCapital is used).

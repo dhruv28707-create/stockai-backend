@@ -1118,14 +1118,17 @@ interface TradePlan {
  *   - target    = entry × (1 + BUY_SCAN_TARGET_PERCENT%)
  *   - expected return (₹) = quantity × (target − entry)
  * Rupees per trade comes from the monthly setup's maxTradeCapital when one
- * exists, otherwise BUY_SCAN_DEFAULT_CAPITAL.
+ * exists, divided by BUY_SCAN_TRADES_PER_MONTH to sustain the budget across
+ * multiple trades. Falls back to BUY_SCAN_DEFAULT_CAPITAL when no monthly
+ * setup exists.
  */
 async function buildTradePlan(entryPrice: number): Promise<TradePlan> {
   const setup = await getCurrentMonthlySetup();
   const maxTradeCapital = Number(setup?.maxTradeCapital);
+  const tradesPerMonth = env.BUY_SCAN_TRADES_PER_MONTH;
   const tradeCapital =
     Number.isFinite(maxTradeCapital) && maxTradeCapital > 0
-      ? maxTradeCapital
+      ? Math.floor(maxTradeCapital / tradesPerMonth)
       : env.BUY_SCAN_DEFAULT_CAPITAL;
 
   const slPercent = env.BUY_SCAN_STOP_LOSS_PERCENT;

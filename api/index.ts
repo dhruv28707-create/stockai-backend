@@ -871,6 +871,50 @@ app.get("/api/cron/check-positions", async (req: Request, res: Response) => {
   }
 });
 
+// ─── Test Scan (proves the job works) ────────────────────────────────────────
+
+app.get("/api/cron/test-scan", async (req: Request, res: Response) => {
+  if (!isAuthorizedCronRequest(req)) {
+    sendError(res, 401, "Unauthorized cron request");
+    return;
+  }
+
+  const job = (req.query.job as string) || "buy_scan";
+  const batchIndex = parseInt(req.query.batch as string) || 1;
+
+  if (job !== "buy_scan" && job !== "sell_scan") {
+    sendError(res, 400, "Invalid job. Use ?job=buy_scan or ?job=sell_scan");
+    return;
+  }
+
+  try {
+    logger.info(`[test-scan] Starting ${job} batch ${batchIndex}`);
+
+    const stocks = getBatch(batchIndex);
+    logger.info(`[test-scan] Batch has ${stocks.length} stocks`, { stocks: stocks.map(s => s.symbol) });
+
+    const quotes = await fetchScanQuotes(batchIndex);
+    logger.info(`[test-scan] Fetched quotes for ${Object.keys(quotes).length} stocks`);
+
+    const result = job === "buy_scan"
+      ? await runBuyScan(batchIndex, stocks)
+      : await runSellScan(batchIndex);
+
+    res.status(200).json({
+      status: "test_completed",
+      job,
+      batch: batchIndex,
+      stocksInBatch: stocks.length,
+      quotesFetched: Object.keys(quotes).length,
+      result,
+      timestamp: new Date().toISOString()
+    });
+  } catch (err) {
+    logger.error(`[test-scan] ${job} failed`, toErrorContext(err));
+    sendError(res, 500, `Test scan failed: ${getErrorMessage(err)}`);
+  }
+});
+
 // ─── Stocks Universe ──────────────────────────────────────────────────────────
 
 app.get("/api/stocks/universe", async (_req: Request, res: Response) => {

@@ -362,6 +362,11 @@ const registerDeviceHandler = async (req: Request, res: Response) => {
 
 app.get("/api/notifications/register", registerDeviceHandler);
 app.post("/api/notifications/register", registerDeviceHandler);
+// Keep the original mobile-client endpoint working.  Earlier Android builds
+// register their FCM token here; without this alias their request receives a
+// 404 and the backend can never deliver a push notification.
+app.get("/api/register-device", registerDeviceHandler);
+app.post("/api/register-device", registerDeviceHandler);
 
 const notificationStatusHandler = async (_req: Request, res: Response) => {
   try {

@@ -28,13 +28,21 @@ const envSchema = z.object({
   // OpenRouter's OpenAI-compatible API) is tried before rule-based picks.
   OPENROUTER_API_KEY: z.string().min(1).optional(),
   QWEN_MODEL: z.string().min(1).default("qwen/qwen-2.5-3b-instruct"),
-  BUY_SCAN_MIN_CHANGE_PERCENT: z.coerce.number().min(0).default(1),
-  BUY_SCAN_MIN_VOLUME: z.coerce.number().min(0).default(30_000),
+  // Quality gates for liquid, sub-₹150 momentum trades. A scan is allowed to
+  // produce fewer than the top-N cap when the market does not meet them.
+  BUY_SCAN_MIN_CHANGE_PERCENT: z.coerce.number().min(0).default(1.5),
+  BUY_SCAN_MIN_VOLUME: z.coerce.number().min(0).default(100_000),
+  BUY_SCAN_MIN_INTRADAY_RANGE_PERCENT: z.coerce.number().min(0).default(1),
+  BUY_SCAN_MAX_DISTANCE_FROM_HIGH_PERCENT: z.coerce.number().min(0).max(100).default(1.5),
   // Price band for buy-scan candidates (this account trades ₹40–₹150 stocks).
   BUY_SCAN_MIN_PRICE: z.coerce.number().min(0).default(40),
   BUY_SCAN_MAX_PRICE: z.coerce.number().min(0).default(150),
-  // How many best picks the daily scan notifies (top-N across the watchlist).
+  // Maximum number of best picks the daily scan notifies (top-N across the
+  // watchlist). This is a cap, never a promise to create weak signals.
   BUY_SCAN_TOP_PICKS: z.coerce.number().min(1).max(10).default(5),
+  // Avoid concentrating every signal in one correlated sector (for example,
+  // five banking stocks responding to the same news).
+  BUY_SCAN_MAX_PER_SECTOR: z.coerce.number().min(1).max(5).default(2),
   // Number of trades per month to divide the maxTradeCapital across, ensuring
   // the monthly budget sustains multiple opportunities instead of one large bet.
   BUY_SCAN_TRADES_PER_MONTH: z.coerce.number().min(1).max(30).default(5),

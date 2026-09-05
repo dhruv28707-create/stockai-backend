@@ -245,7 +245,7 @@ export async function analyzeWithAI(
   const responseInstruction =
     safeCount === 1
       ? `Reply with ONLY valid JSON, no markdown, no explanation:\n\n${pickShape}\n\nIf no candidate is worth buying, reply with exactly: null`
-      : `Reply with ONLY valid JSON, no markdown, no explanation. Return up to ${safeCount} distinct picks, ranked best first, as a JSON array:\n\n[${pickShape}]\n\nIf fewer than ${safeCount} candidates are worth buying, return fewer. If none, reply with exactly: null`;
+      : `Reply with ONLY valid JSON, no markdown, no explanation. Return up to ${safeCount} distinct picks, ranked best first, as a JSON array:\n\n[${pickShape}]\n\nDo not force a weak pick just to reach ${safeCount}. If fewer candidates are strong enough, return fewer. If none, reply with exactly: null`;
 
   const prompt = `You are a disciplined momentum analyst for NSE (India) stocks. These candidates have already been pre-filtered for movement, volume, and price band. Pick the best ${direction} opportunities for swing trades (2-10 days).
 
@@ -255,7 +255,8 @@ ${candidatesJson}
 Rules:
 - Prefer stocks with strong momentum, healthy volume, and a solid reason (news, sector tailwind, breakout).
 - Avoid stocks that are barely moving or have unusually low volume.
-- ALWAYS pick the best available candidate. Return null ONLY if every single candidate is genuinely weak (e.g. all moves are negligible or volume has collapsed).
+- When selecting multiple picks, diversify across sectors where possible; do not select correlated names solely because they rose together.
+- Return null if every candidate is genuinely weak.
 ${responseInstruction}`;
 
   if (!env.GEMINI_API_KEY && !env.OPENROUTER_API_KEY) {

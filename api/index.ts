@@ -754,7 +754,7 @@ app.post("/api/capital/profit", async (req: Request, res: Response) => {
 //
 // vercel.json schedules one daily run that scans the ₹40–₹150 watchlist and
 // notifies the best BUY_SCAN_TOP_PICKS opportunities (top-N, default 5):
-//   12:00 PM IST → /api/cron/scan  (no batch param → batch=all)
+//   11:00 AM IST → /api/cron/scan  (no batch param → batch=all)
 // Manual / external cron use (legacy single-batch mode, still works):
 //   12:00 IST → /api/cron/scan?batch=1
 // Manual re-run after today's scan already completed (e.g. debugging):
@@ -966,6 +966,18 @@ interface BuyScanResult {
   pushError?: string;
 }
 
+/** Limit correlated exposure in a single daily set of buy signals. */
+function limitPicksPerSector(picks: AIPick[]): AIPick[] {
+  const sectors = new Map<string, number>();
+  return picks.filter((pick) => {
+    const sector = pick.sector.trim().toLowerCase() || "unclassified";
+    const count = sectors.get(sector) ?? 0;
+    if (count >= env.BUY_SCAN_MAX_PER_SECTOR) return false;
+    sectors.set(sector, count + 1);
+    return true;
+  });
+}
+
 interface SellScanResult {
   status: "completed" | "failed" | "skipped";
   message?: string;
@@ -1107,6 +1119,8 @@ function buildBuyCandidates(stocks: StockInfo[], quotes: QuoteMap): Candidate[] 
 
   const minChange = env.BUY_SCAN_MIN_CHANGE_PERCENT;
   const minVolume = env.BUY_SCAN_MIN_VOLUME;
+  const minIntradayRange = env.BUY_SCAN_MIN_INTRADAY_RANGE_PERCENT;
+  const maxDistanceFromHigh = env.BUY_SCAN_MAX_DISTANCE_FROM_HIGH_PERCENT;
   const minPrice = env.BUY_SCAN_MIN_PRICE;
   const maxPrice = env.BUY_SCAN_MAX_PRICE;
 
@@ -1118,34 +1132,24 @@ function buildBuyCandidates(stocks: StockInfo[], quotes: QuoteMap): Candidate[] 
     });
   }
 
-  // Price-band filter: this account trades ₹50–₹150 stocks, so a watchlist
-  // name that crossed outside the band today (e.g. above ₹150) is skipped
-  // rather than notified.
-  let candidates = withQuote
+  // Demand liquid momentum that is holding near the intraday high. This avoids
+  // thin, volatile names and stocks that surged earlier but are already fading.
+  const candidates = withQuote
     .filter(
-      (c) =>
-        c.changePercent >= minChange &&
-        c.volume >= minVolume &&
-        c.price >= minPrice &&
-        c.price <= maxPrice
+      (c) => {
+        const intradayRangePercent = c.price > 0 ? ((c.high - c.low) / c.price) * 100 : 0;
+        const distanceFromHighPercent = c.high > 0 ? ((c.high - c.price) / c.high) * 100 : 100;
+        return (
+          c.changePercent >= minChange &&
+          c.volume >= minVolume &&
+          c.price >= minPrice &&
+          c.price <= maxPrice &&
+          intradayRangePercent >= minIntradayRange &&
+          distanceFromHighPercent <= maxDistanceFromHigh
+        );
+      }
     )
     .sort((a, b) => b.changePercent - a.changePercent);
-
-  // If the strict filter finds too little today, widen to the top gainers so
-  // the AI still has candidates to evaluate — signals should fire on most days.
-  if (candidates.length < 2) {
-    const widened = withQuote
-      .filter(
-        (c) =>
-          c.changePercent > 0 &&
-          c.volume >= Math.max(10_000, Math.floor(minVolume / 2)) &&
-          c.price >= minPrice &&
-          c.price <= maxPrice
-      )
-      .sort((a, b) => b.changePercent - a.changePercent)
-      .slice(0, 8);
-    if (widened.length > 0) candidates = widened;
-  }
 
   return candidates;
 }
@@ -1380,7 +1384,9 @@ async function runBuyScanAll(): Promise<BuyScanResult[]> {
     .sort((a, b) => b.changePercent - a.changePercent)
     .slice(0, 15);
 
-  const picks = await analyzeWithAI(topCandidates, "buy", env.BUY_SCAN_TOP_PICKS);
+  const picks = limitPicksPerSector(
+    await analyzeWithAI(topCandidates, "buy", env.BUY_SCAN_TOP_PICKS)
+  );
 
   if (picks.length === 0) {
     await logCronRun("buy_scan", 0, "completed", "AI found no strong signal");

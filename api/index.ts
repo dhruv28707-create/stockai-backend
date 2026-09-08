@@ -14,7 +14,8 @@ import {
 import {
   getLiveMarketData,
   getMarketSummary,
-  getYahooScanQuotes
+  getYahooScanQuotes,
+  type ScanQuote
 } from "../services/marketData";
 import { getISTTimestampLabel } from "../services/fcm";
 import {
@@ -932,16 +933,7 @@ app.get("/api/stocks/universe", async (_req: Request, res: Response) => {
 
 // ─── Buy Scan Logic ───────────────────────────────────────────────────────────
 
-interface ScanQuoteData {
-  ltp: number;
-  dayChange: number;
-  dayChangePercentage: number;
-  volume: number;
-  high: number;
-  low: number;
-}
-
-type QuoteMap = Record<string, ScanQuoteData>;
+type QuoteMap = Record<string, ScanQuote>;
 
 /**
  * Fetch quotes for the scans. Defaults to Yahoo Finance (works from Vercel's

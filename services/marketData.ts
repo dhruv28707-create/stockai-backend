@@ -107,6 +107,16 @@ function getMarketStatus(
 
 const YAHOO_BATCH = 30;
 
+/** Round to 2 decimals — the precision used across all quote-derived numbers. */
+function round2(n: number): number {
+  return Math.round(n * 100) / 100;
+}
+
+/** Percentage change from previous close, rounded to 2 decimals (0 when no prevClose). */
+function changePercent(price: number, prevClose: number): number {
+  return prevClose ? round2(((price - prevClose) / prevClose) * 100) : 0;
+}
+
 async function fetchYahooQuotes(
   tickers: string[]
 ): Promise<Record<string, Record<string, unknown>>> {
@@ -147,50 +157,28 @@ export interface ScanQuote {
 
 /**
  * Quotes for the scan pipeline, keyed by clean NSE symbol (e.g. "HDFCBANK").
- * Yahoo does not return results in the requested order, so we map by the
- * `symbol` field Yahoo actually returned (never by array index).
+ * Shares the batched Yahoo fetch with the summary/live endpoints; Yahoo does
+ * not return results in the requested order, so we map by the `symbol` field
+ * Yahoo actually returned (never by array index).
  */
 export async function getYahooScanQuotes(
   tickers: string[]
 ): Promise<Record<string, ScanQuote>> {
+  const rawQuotes = await fetchYahooQuotes(tickers);
   const result: Record<string, ScanQuote> = {};
 
-  for (let i = 0; i < tickers.length; i += YAHOO_BATCH) {
-    const batch = tickers.slice(i, i + YAHOO_BATCH);
-    let results: (Record<string, unknown> | null)[] | null;
-    try {
-      results = (await yahooFinance.quote(
-        batch,
-        {},
-        { validateResult: false }
-      )) as (Record<string, unknown> | null)[];
-    } catch {
-      continue;
-    }
-    if (!Array.isArray(results)) continue;
-
-    results.forEach((q) => {
-      if (!q) return;
-      // Only trust the symbol Yahoo actually returned — falling back to the
-      // requested index mislabels quotes whenever Yahoo reorders/drops
-      // results, which fed wrong prices into the buy/sell scans.
-      const returnedSymbol = typeof q.symbol === "string" ? q.symbol : "";
-      if (!returnedSymbol) return;
-      const cleanSymbol = returnedSymbol.replace(/\.NS$/, "").replace("-EQ", "");
-      const price = (q.regularMarketPrice as number) ?? 0;
-      const prevClose = (q.regularMarketPreviousClose as number) ?? price;
-      const change = price - prevClose;
-      result[cleanSymbol] = {
-        ltp: price,
-        dayChange: Math.round(change * 100) / 100,
-        dayChangePercentage: prevClose
-          ? Math.round((change / prevClose) * 10000) / 100
-          : 0,
-        volume: (q.regularMarketVolume as number) ?? 0,
-        high: (q.regularMarketDayHigh as number) ?? price,
-        low: (q.regularMarketDayLow as number) ?? price
-      };
-    });
+  for (const [returnedSymbol, q] of Object.entries(rawQuotes)) {
+    const cleanSymbol = returnedSymbol.replace(/\.NS$/, "").replace("-EQ", "");
+    const price = (q.regularMarketPrice as number) ?? 0;
+    const prevClose = (q.regularMarketPreviousClose as number) ?? price;
+    result[cleanSymbol] = {
+      ltp: price,
+      dayChange: round2(price - prevClose),
+      dayChangePercentage: changePercent(price, prevClose),
+      volume: (q.regularMarketVolume as number) ?? 0,
+      high: (q.regularMarketDayHigh as number) ?? price,
+      low: (q.regularMarketDayLow as number) ?? price
+    };
   }
 
   return result;
@@ -203,36 +191,18 @@ export async function getMarketSummary(): Promise<MarketSummary> {
   const allTickers = [...NSE_INDICES.map((i) => i.ticker), ...NSE_STOCKS];
   const quotes = await fetchYahooQuotes(allTickers);
 
-  const indices: IndexData[] = NSE_INDICES.filter((i) => quotes[i.ticker]).map((i) => {
-    const q = quotes[i.ticker];
-    const price = (q.regularMarketPrice as number) ?? 0;
-    const prevClose = (q.regularMarketPreviousClose as number) ?? price;
-    const change = price - prevClose;
-    return {
-      name: i.name,
-      value: price,
-      change: Math.round(change * 100) / 100,
-      changePercent: prevClose ? Math.round((change / prevClose) * 10000) / 100 : 0,
-      high: (q.regularMarketDayHigh as number) ?? price,
-      low: (q.regularMarketDayLow as number) ?? price,
-      open: (q.regularMarketOpen as number) ?? prevClose,
-      prevClose,
-      volume: (q.regularMarketVolume as number) ?? 0,
-      timestamp: new Date().toISOString()
-    };
-  });
+  const indices = buildIndices(quotes);
 
   const movers = NSE_STOCKS.filter((t) => quotes[t]).map((t) => {
     const q = quotes[t];
     const price = (q.regularMarketPrice as number) ?? 0;
     const prevClose = (q.regularMarketPreviousClose as number) ?? price;
-    const change = price - prevClose;
     return {
       symbol: t.replace(".NS", ""),
       name: (q.shortName as string) ?? (q.longName as string) ?? t.replace(".NS", ""),
       price,
-      change: Math.round(change * 100) / 100,
-      changePercent: prevClose ? Math.round((change / prevClose) * 10000) / 100 : 0,
+      change: round2(price - prevClose),
+      changePercent: changePercent(price, prevClose),
       volume: (q.regularMarketVolume as number) ?? 0,
       exchange: "NSE"
     };
@@ -324,24 +294,7 @@ export async function getLiveMarketData(
   ];
   const quotes = await fetchYahooQuotes(tickers);
 
-  const indices: IndexData[] = NSE_INDICES.filter((i) => quotes[i.ticker]).map((i) => {
-    const q = quotes[i.ticker];
-    const price = (q.regularMarketPrice as number) ?? 0;
-    const prevClose = (q.regularMarketPreviousClose as number) ?? price;
-    const change = price - prevClose;
-    return {
-      name: i.name,
-      value: price,
-      change: Math.round(change * 100) / 100,
-      changePercent: prevClose ? Math.round((change / prevClose) * 10000) / 100 : 0,
-      high: (q.regularMarketDayHigh as number) ?? price,
-      low: (q.regularMarketDayLow as number) ?? price,
-      open: (q.regularMarketOpen as number) ?? prevClose,
-      prevClose,
-      volume: (q.regularMarketVolume as number) ?? 0,
-      timestamp: new Date().toISOString()
-    };
-  });
+  const indices = buildIndices(quotes);
 
   const quotesList: LiveQuote[] = ALL_STOCKS.filter((s) => quotes[s.yahooTicker]).map(
     (s) => {
@@ -401,16 +354,38 @@ function toLiveQuote(
 ): LiveQuote {
   const price = (q.regularMarketPrice as number) ?? 0;
   const prevClose = (q.regularMarketPreviousClose as number) ?? price;
-  const change = price - prevClose;
   return {
     symbol,
     name,
     sector,
-    price: Math.round(price * 100) / 100,
-    change: Math.round(change * 100) / 100,
-    changePercent: prevClose ? Math.round((change / prevClose) * 10000) / 100 : 0,
+    price: round2(price),
+    change: round2(price - prevClose),
+    changePercent: changePercent(price, prevClose),
     volume: (q.regularMarketVolume as number) ?? 0,
     high: (q.regularMarketDayHigh as number) ?? price,
     low: (q.regularMarketDayLow as number) ?? price
   };
+}
+
+/** Build the NIFTY/BANK NIFTY index rows shared by summary and live endpoints. */
+function buildIndices(
+  quotes: Record<string, Record<string, unknown>>
+): IndexData[] {
+  return NSE_INDICES.filter((i) => quotes[i.ticker]).map((i) => {
+    const q = quotes[i.ticker];
+    const price = (q.regularMarketPrice as number) ?? 0;
+    const prevClose = (q.regularMarketPreviousClose as number) ?? price;
+    return {
+      name: i.name,
+      value: price,
+      change: round2(price - prevClose),
+      changePercent: changePercent(price, prevClose),
+      high: (q.regularMarketDayHigh as number) ?? price,
+      low: (q.regularMarketDayLow as number) ?? price,
+      open: (q.regularMarketOpen as number) ?? prevClose,
+      prevClose,
+      volume: (q.regularMarketVolume as number) ?? 0,
+      timestamp: new Date().toISOString()
+    };
+  });
 }

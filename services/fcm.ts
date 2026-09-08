@@ -15,7 +15,7 @@ const INVALID_TOKEN_ERROR_CODES = [
   "messaging/invalid-registration-token"
 ];
 
-export interface PushMetadata {
+interface PushMetadata {
   type: string;
   priority: "HIGH" | "MEDIUM" | "LOW";
   symbol?: string;
@@ -44,7 +44,7 @@ export async function registerDeviceToken(token: string): Promise<void> {
   );
 }
 
-export async function resolveDeviceToken(): Promise<string | null> {
+async function resolveDeviceToken(): Promise<string | null> {
   const tokenDoc = await getDb()
     .collection(collectionNames.settings)
     .doc(TOKEN_DOC_ID)

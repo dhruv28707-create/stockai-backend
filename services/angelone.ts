@@ -183,11 +183,6 @@ export async function login(): Promise<AngelOneTokens> {
   return tokens;
 }
 
-export async function refreshSession(): Promise<AngelOneTokens> {
-  tokenCache = null;
-  return login();
-}
-
 export interface AngelOneQuoteData {
   tradingSymbol: string;
   symbolToken: string;

@@ -1459,75 +1459,147 @@ async function runSellScan(batchIndex: number): Promise<SellScanResult> {
   }
 
   const dayKey = getISTDateKey();
-  const downPercent = env.SELL_SCAN_DOWN_PERCENT;
-  const upPercent = env.SELL_SCAN_UP_PERCENT;
+  const holdAtPercent = env.SELL_SCAN_HOLD_AT_PERCENT;
+  const sellAtPercent = env.SELL_SCAN_SELL_AT_PERCENT;
+  const resetBelowPercent = env.SELL_SCAN_RESET_BELOW_PERCENT;
+  const peakResetBelowPercent = resetBelowPercent;
   let alertsSent = 0;
 
+  // Per-position state that survives cold starts and day boundaries. Once a
+  // position has been flagged at +3% ("held"), we keep watching it until a
+  // subsequent scan sees it drop meaningfully from its recorded intraday high.
+  // State is keyed by symbol because positions are already unique per symbol.
+  const stateSnap = await getDb()
+    .collection(collectionNames.perSymbolAlertState)
+    .where("userId", "==", env.SINGLE_USER_ID)
+    .where("type", "==", "held_position")
+    .get();
+  const heldStateBySymbol = new Map<string, { highPnlPercent: number }>();
+  for (const doc of stateSnap.docs) {
+    const data = doc.data() as {
+      symbol?: string;
+      highPnlPercent?: number;
+    } | undefined;
+    if (data?.symbol && typeof data.highPnlPercent === "number") {
+      heldStateBySymbol.set(data.symbol.toUpperCase(), data);
+    }
+  }
+
   for (const position of positions) {
-    const symbol = String(position.symbol ?? "");
+    const symbol = String(position.symbol ?? "").toUpperCase();
     const q = quotes[symbol];
     if (!q) continue;
 
     const entryPrice = Number(position.entryPrice ?? position.entry ?? 0);
     if (!entryPrice) continue;
 
-    const pnlPercent = ((q.ltp - entryPrice) / entryPrice) * 100;
-    const positionName = typeof position.name === "string" ? position.name : symbol;
+    const currentPrice = Number(q.ltp);
+    const pnlPercent = ((currentPrice - entryPrice) / entryPrice) * 100;
+    const positionName =
+      typeof position.name === "string" && position.name.trim()
+        ? position.name.trim()
+        : symbol;
+
     // Carried in the notification's data payload so the app can render the
     // same numbers the push shows, exactly like buy-signal notifications.
     const signalData = {
       symbol,
       name: positionName,
-      currentPrice: q.ltp,
+      currentPrice,
       entryPrice,
       pnlPercent,
       quantity: position.quantity,
       stopLoss: position.stopLoss,
-      target: position.target
+      target: position.target,
+      marketAction: true
     };
 
-    // Market moving down → sell signal (mirrors the buy-signal flow: same
-    // HIGH push with dedup, so a falling position is flagged once per day).
-    if (pnlPercent <= -downPercent) {
-      const dedupKey = `SELL:${symbol}:${dayKey}`;
-      if (await isKeyNotified(dedupKey)) continue;
-      const push = await sendPushNotification(
-        `📉 Sell Signal: ${symbol}`,
-        [
-          `${positionName} is down ${Math.abs(pnlPercent).toFixed(2)}% from your entry of ₹${entryPrice.toFixed(2)} (CMP ₹${q.ltp.toFixed(2)}).`,
-          `Consider selling to protect your capital.`
-        ].join("\n"),
-        "SELL_ALERT",
-        "HIGH",
-        symbol,
-        undefined,
-        signalData
-      );
-      if (push.sent) {
-        await markKeyNotified(dedupKey);
-        alertsSent++;
-      }
+    const heldState = heldStateBySymbol.get(symbol);
+    const wasHeld = Boolean(heldState);
+    const recordedHighPnl = heldState?.highPnlPercent ?? pnlPercent;
+
+    // Update the tracked high-water mark for this position so the "drop from
+    // peak" alert is measured against the best level seen while held.
+    const newHighPnl = Math.max(recordedHighPnl, pnlPercent);
+
+    // Once a position has meaningfully cooled off from entry after being held,
+    // forget the held state — the next time it climbs back to +3% it should
+    // re-alert rather than silently staying in monitoring mode.
+    const shouldUnhold =
+      wasHeld &&
+      pnlPercent <= resetBelowPercent &&
+      recordedHighPnl >= holdAtPercent;
+
+    if (shouldUnhold) {
+      await clearHeldState(symbol);
+      continue;
     }
-    // Market moving up → hold signal: the position is working, keep holding.
-    else if (pnlPercent >= upPercent) {
+
+    // ── Tier 1: first time crossing into profit from entry ──────────────────
+    // When the position first reaches the hold alert threshold (e.g. +3%), send
+    // a HOLD_ALERT. Tapping the notification opens the position screen (see
+    // `actionUrl`) where the user can choose to keep holding. While held the
+    // backend keeps checking, and the next meaningful drop triggers a SELL_ALERT
+    // instead of waiting for the old -3% which guaranteed a loss.
+    if (!wasHeld && pnlPercent >= holdAtPercent) {
       const dedupKey = `HOLD:${symbol}:${dayKey}`;
-      if (await isKeyNotified(dedupKey)) continue;
-      const push = await sendPushNotification(
-        `🟢 Hold Signal: ${symbol}`,
-        [
-          `${positionName} is up ${pnlPercent.toFixed(2)}% from your entry of ₹${entryPrice.toFixed(2)} (CMP ₹${q.ltp.toFixed(2)}).`,
-          `Hold your position — the move is in your favor.`
-        ].join("\n"),
-        "HOLD_ALERT",
-        "HIGH",
-        symbol,
-        undefined,
-        signalData
-      );
-      if (push.sent) {
-        await markKeyNotified(dedupKey);
-        alertsSent++;
+      if (!(await isKeyNotified(dedupKey))) {
+        const push = await sendPushNotification(
+          `🟢 ${symbol} at +${pnlPercent.toFixed(2)}%`,
+          [
+            `${positionName} is up ${pnlPercent.toFixed(2)}% from your entry of ₹${entryPrice.toFixed(2)} (CMP ₹${currentPrice.toFixed(2)}).`,
+            `Hold and keep monitoring, or withdraw now.`
+          ].join("\n"),
+          "HOLD_ALERT",
+          "HIGH",
+          symbol,
+          `/position/${symbol}`,
+          signalData
+        );
+        if (push.sent) {
+          await markKeyNotified(dedupKey);
+          await setHeldState(symbol, pnlPercent);
+          alertsSent++;
+        }
       }
+      continue;
+    }
+
+    // ── Tier 2: held position drops from its peak ───────────────────────────
+    // Once a position has been flagged at +3% and is now falling, alert on the
+    // first meaningful pullback from the recorded high rather than on -3% from
+    // entry. Using a smaller drop threshold (default -2% from the peak) gives the
+    // user a chance to exit near break-even or with a small profit instead of
+    // waiting for the loss to grow.
+    if (wasHeld && pnlPercent <= recordedHighPnl - sellAtPercent) {
+      const dropFromPeak = recordedHighPnl - pnlPercent;
+      const dedupKey = `SELL:${symbol}:${dayKey}`;
+      if (!(await isKeyNotified(dedupKey))) {
+        const push = await sendPushNotification(
+          `📉 ${symbol} down ${dropFromPeak.toFixed(2)}% from peak`,
+          [
+            `${positionName} is now ${(pnlPercent).toFixed(2)}% from entry (CMP ₹${currentPrice.toFixed(2)}), down ${dropFromPeak.toFixed(2)}% from the +${recordedHighPnl.toFixed(2)}% peak.`,
+            `Consider withdrawing to protect your profits.`
+          ].join("\n"),
+          "SELL_ALERT",
+          "HIGH",
+          symbol,
+          `/position/${symbol}`,
+          signalData
+        );
+        if (push.sent) {
+          await markKeyNotified(dedupKey);
+          alertsSent++;
+        }
+      }
+      continue;
+    }
+
+    // Update the stored high-water mark when the position is still held and
+    // making new highs (best-effort — a write failure must never stop the
+    // alert from being delivered on the next drop).
+    if (wasHeld && newHighPnl > recordedHighPnl) {
+      await setHeldState(symbol, newHighPnl).catch(() => undefined);
     }
   }
 
@@ -1657,6 +1729,39 @@ async function getOpenPositionIdsBySymbol(): Promise<Map<string, string>> {
       error: getErrorMessage(err)
     });
     return new Map();
+  }
+}
+
+/**
+ * Persist the "held" monitoring state for a symbol so the sell scan keeps
+ * tracking its peak PnL across cold starts and subsequent cron runs.
+ * Same-day dedup still prevents duplicate pushes; this state is about the
+ * higher-level "once flagged, keep watching until it drops" flow.
+ */
+async function setHeldState(symbol: string, highPnlPercent: number): Promise<void> {
+  const ref = getDb()
+    .collection(collectionNames.perSymbolAlertState)
+    .doc(`held_${env.SINGLE_USER_ID}_${symbol}`);
+  await ref.set(
+    {
+      userId: env.SINGLE_USER_ID,
+      type: "held_position",
+      symbol,
+      highPnlPercent,
+      updatedAt: Timestamp.now()
+    },
+    { merge: true }
+  );
+}
+
+async function clearHeldState(symbol: string): Promise<void> {
+  try {
+    await getDb()
+      .collection(collectionNames.perSymbolAlertState)
+      .doc(`held_${env.SINGLE_USER_ID}_${symbol}`)
+      .delete();
+  } catch {
+    // Best-effort cleanup.
   }
 }
 

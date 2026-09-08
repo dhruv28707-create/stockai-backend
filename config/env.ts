@@ -51,11 +51,21 @@ const envSchema = z.object({
   BUY_SCAN_STOP_LOSS_PERCENT: z.coerce.number().min(0).default(3),
   BUY_SCAN_TARGET_PERCENT: z.coerce.number().min(0).default(7),
   BUY_SCAN_DEFAULT_CAPITAL: z.coerce.number().min(0).default(10_000),
-  // Sell-scan thresholds for open positions (Trade tab): a position down more
-  // than SELL_SCAN_DOWN_PERCENT gets a sell signal; up more than
-  // SELL_SCAN_UP_PERCENT gets a hold signal. Between the two, no alert.
-  SELL_SCAN_DOWN_PERCENT: z.coerce.number().min(0).default(3),
-  SELL_SCAN_UP_PERCENT: z.coerce.number().min(0).default(5),
+  // Sell-scan thresholds for open positions (Trade tab).
+  //
+  // New tiered flow (replaces the old single hold-at-+5% / sell-at--3% setup):
+  //   - SELL_SCAN_HOLD_AT_PERCENT (default +3%): when a position first crosses
+  //     this profit level it gets a HOLD_ALERT so the user can open the position
+  //     and choose to keep holding. While "held" the backend keeps monitoring.
+  //   - SELL_SCAN_SELL_AT_PERCENT (default -2%): once a held position has peaked
+  //     and then drops by this much from its recorded high, it gets a SELL_ALERT
+  //     so the user can exit with little/no loss instead of waiting for -3%.
+  // Between the +3% hold alert and the first drop alert, no notifications are
+  // sent (the position is being watched). A position is "unheld" automatically
+  // once it crosses back below +1% from entry, so the next +3% run re-alerts.
+  SELL_SCAN_HOLD_AT_PERCENT: z.coerce.number().min(0).default(3),
+  SELL_SCAN_SELL_AT_PERCENT: z.coerce.number().min(0).default(2),
+  SELL_SCAN_RESET_BELOW_PERCENT: z.coerce.number().min(0).default(1),
   // "yahoo" works from any host (Vercel included); "angelone" is real-time
   // but its WAF blocks cloud/datacenter IPs, so it only works from a
   // residential IP.

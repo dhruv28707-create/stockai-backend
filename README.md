@@ -107,5 +107,14 @@ You can also trigger the buy scan manually at any time: `GET /api/cron/scan?batc
 
 ## Sell-scan tuning (optional env vars)
 
-- `SELL_SCAN_DOWN_PERCENT` (default `3`) — an open position down more than this % from entry triggers a **sell signal** notification (`SELL_ALERT`).
-- `SELL_SCAN_UP_PERCENT` (default `5`) — an open position up more than this % from entry triggers a **hold signal** notification (`HOLD_ALERT`). Between the two thresholds no alert is sent.
+New sell-scan flow (profit-first, loss-avoiding):
+
+- When an open position first reaches `SELL_SCAN_HOLD_AT_PERCENT` (default `+3%`) from entry, it receives a **hold alert** (`HOLD_ALERT`). Tapping the notification opens the position so you can choose to keep holding. While held, the backend keeps monitoring the position's peak PnL.
+- While a position is held, no further alerts are sent as it keeps rising.
+- If a held position then drops by `SELL_SCAN_SELL_AT_PERCENT` (default `2%`) from its recorded peak, it receives a **sell alert** (`SELL_ALERT`) so you can exit near break-even or with a small profit instead of waiting for a loss.
+- A held position is automatically "unheld" once it falls back below `SELL_SCAN_RESET_BELOW_PERCENT` (default `+1%`) from entry, so the next time it climbs back to +3% it re-alerts.
+- `SELL_SCAN_HOLD_AT_PERCENT` (default `3`)
+- `SELL_SCAN_SELL_AT_PERCENT` (default `2`)
+- `SELL_SCAN_RESET_BELOW_PERCENT` (default `1`)
+
+The old single-threshold setup (`SELL_SCAN_DOWN_PERCENT` / `SELL_SCAN_UP_PERCENT`) is no longer used by the sell scan.

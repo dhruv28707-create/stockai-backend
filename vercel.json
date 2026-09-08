@@ -15,7 +15,7 @@
     },
     {
       "path": "/api/cron/check-positions",
-      "schedule": "30 8 * * 1-5"
+      "schedule": "0 8 * * 1-5"
     }
   ],
   "rewrites": [

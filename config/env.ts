@@ -52,6 +52,11 @@ const envSchema = z.object({
   BUY_SCAN_STOP_LOSS_PERCENT: z.coerce.number().min(0).default(3),
   BUY_SCAN_TARGET_PERCENT: z.coerce.number().min(0).default(7),
   BUY_SCAN_DEFAULT_CAPITAL: z.coerce.number().min(0).default(10_000),
+  // Sell-scan thresholds for open positions (Trade tab): a position down more
+  // than SELL_SCAN_DOWN_PERCENT gets a sell signal; up more than
+  // SELL_SCAN_UP_PERCENT gets a hold signal. Between the two, no alert.
+  SELL_SCAN_DOWN_PERCENT: z.coerce.number().min(0).default(3),
+  SELL_SCAN_UP_PERCENT: z.coerce.number().min(0).default(5),
   // "yahoo" works from any host (Vercel included); "angelone" is real-time
   // but its WAF blocks cloud/datacenter IPs, so it only works from a
   // residential IP.

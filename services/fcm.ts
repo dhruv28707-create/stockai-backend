@@ -277,7 +277,7 @@ function getNotificationChannel(type: string): { channelId: string; sound: strin
     return { channelId: "sell_signals", sound: "sell_signal" };
   }
 
-  if (type.includes("MARKET")) {
+  if (type.includes("MARKET") || type.includes("HOLD")) {
     return { channelId: "market_updates", sound: "market_update" };
   }
 

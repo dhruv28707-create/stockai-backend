@@ -1419,7 +1419,8 @@ async function runBuyScanAll(): Promise<BuyScanResult[]> {
 async function runSellScan(batchIndex: number): Promise<SellScanResult> {
   await logCronRun("sell_scan", batchIndex, "running");
 
-  // Fetch open positions from Firestore
+  // Scan the Trade tab: every open position the user has bought. Closed /
+  // sold positions are ignored — nothing to alert about.
   const positionsSnap = await getDb()
     .collection(collectionNames.positions)
     .where("userId", "==", env.SINGLE_USER_ID)
@@ -1442,7 +1443,7 @@ async function runSellScan(batchIndex: number): Promise<SellScanResult> {
   try {
     // Fetch quotes for the watchlist PLUS every open position's symbol, so
     // positions from the old large-cap universe (e.g. earlier buy signals)
-    // keep getting stop-loss / profit-target alerts.
+    // keep getting sell / hold alerts.
     if (env.SCAN_DATA_SOURCE === "angelone") {
       // Note: getQuotes() only covers the watchlist universe, so legacy
       // large-cap positions get no quotes in Angel One mode. Acceptable —
@@ -1466,6 +1467,8 @@ async function runSellScan(batchIndex: number): Promise<SellScanResult> {
   }
 
   const dayKey = getISTDateKey();
+  const downPercent = env.SELL_SCAN_DOWN_PERCENT;
+  const upPercent = env.SELL_SCAN_UP_PERCENT;
   let alertsSent = 0;
 
   for (const position of positions) {
@@ -1477,33 +1480,57 @@ async function runSellScan(batchIndex: number): Promise<SellScanResult> {
     if (!entryPrice) continue;
 
     const pnlPercent = ((q.ltp - entryPrice) / entryPrice) * 100;
+    const positionName = typeof position.name === "string" ? position.name : symbol;
+    // Carried in the notification's data payload so the app can render the
+    // same numbers the push shows, exactly like buy-signal notifications.
+    const signalData = {
+      symbol,
+      name: positionName,
+      currentPrice: q.ltp,
+      entryPrice,
+      pnlPercent,
+      quantity: position.quantity,
+      stopLoss: position.stopLoss,
+      target: position.target
+    };
 
-    // Alert if down more than 3% from entry (stop-loss zone)
-    if (pnlPercent <= -3) {
-      const dedupKey = `SL:${symbol}:${dayKey}`;
+    // Market moving down → sell signal (mirrors the buy-signal flow: same
+    // HIGH push with dedup, so a falling position is flagged once per day).
+    if (pnlPercent <= -downPercent) {
+      const dedupKey = `SELL:${symbol}:${dayKey}`;
       if (await isKeyNotified(dedupKey)) continue;
       const push = await sendPushNotification(
-        `🔴 Stop-Loss Alert: ${symbol}`,
-        `${symbol} is down ${Math.abs(pnlPercent).toFixed(2)}% from your entry of ₹${entryPrice}. Consider exiting.`,
-        "STOP_LOSS_ALERT",
+        `📉 Sell Signal: ${symbol}`,
+        [
+          `${positionName} is down ${Math.abs(pnlPercent).toFixed(2)}% from your entry of ₹${entryPrice.toFixed(2)} (CMP ₹${q.ltp.toFixed(2)}).`,
+          `Consider selling to protect your capital.`
+        ].join("\n"),
+        "SELL_ALERT",
         "HIGH",
-        symbol
+        symbol,
+        undefined,
+        signalData
       );
       if (push.sent) {
         await markKeyNotified(dedupKey);
         alertsSent++;
       }
     }
-    // Alert if up more than 5% from entry (take-profit zone)
-    else if (pnlPercent >= 5) {
-      const dedupKey = `TP:${symbol}:${dayKey}`;
+    // Market moving up → hold signal: the position is working, keep holding.
+    else if (pnlPercent >= upPercent) {
+      const dedupKey = `HOLD:${symbol}:${dayKey}`;
       if (await isKeyNotified(dedupKey)) continue;
       const push = await sendPushNotification(
-        `🟢 Profit Target: ${symbol}`,
-        `${symbol} is up ${pnlPercent.toFixed(2)}% from your entry of ₹${entryPrice}. Consider booking profits.`,
-        "SELL_ALERT",
+        `🟢 Hold Signal: ${symbol}`,
+        [
+          `${positionName} is up ${pnlPercent.toFixed(2)}% from your entry of ₹${entryPrice.toFixed(2)} (CMP ₹${q.ltp.toFixed(2)}).`,
+          `Hold your position — the move is in your favor.`
+        ].join("\n"),
+        "HOLD_ALERT",
         "HIGH",
-        symbol
+        symbol,
+        undefined,
+        signalData
       );
       if (push.sent) {
         await markKeyNotified(dedupKey);
@@ -1512,8 +1539,13 @@ async function runSellScan(batchIndex: number): Promise<SellScanResult> {
     }
   }
 
-  await logCronRun("sell_scan", batchIndex, "completed");
-  return { status: "completed", alertsSent };
+  await logCronRun(
+    "sell_scan",
+    batchIndex,
+    "completed",
+    `${alertsSent} alert(s) sent for ${positions.length} open position(s)`
+  );
+  return { status: "completed", message: `${alertsSent} alert(s) sent`, alertsSent };
 }
 
 // ─── Helpers ──────────────────────────────────────────────────────────────────

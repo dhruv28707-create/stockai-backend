@@ -10,7 +10,7 @@ Single-user backend for a personal Indian stock-market AI assistant.
 - Exposes portfolio, recommendation, notification, capital, and market summary APIs.
 - Defines weekday cron jobs for:
   - 11:00 AM IST buy scan: `/api/cron/scan?batch=all` (scans all batches, picks the strongest candidates in the ₹40–₹150 band, and pushes buy signals)
-  - 2:00 PM IST portfolio/sell scan: `/api/cron/check-positions` (stop-loss / profit alerts)
+  - 1:30 PM IST portfolio/sell scan: `/api/cron/check-positions` (scans the Trade tab: sell signal when a position drops, hold signal when it gains)
 - Serves live watchlist quotes (poll `/api/market/live` or stream `/api/market/stream`) so the app's digits update like Angel One's feed.
 
 ## Stack
@@ -82,7 +82,7 @@ http://localhost:3000/api
 `vercel.json` schedules weekday jobs in UTC (both fit on the Hobby plan's daily limit):
 
 - `30 5 * * 1-5` → `/api/cron/scan?batch=all` = 11:00 AM IST buy scan (up to 5 strong picks, ₹40–₹150 band)
-- `30 8 * * 1-5` → `/api/cron/check-positions` = 2:00 PM IST sell scan
+- `0 8 * * 1-5` → `/api/cron/check-positions` = 1:30 PM IST sell scan (scans open positions: sell signal on down moves, hold signal on up moves)
 
 Set `CRON_SECRET` in Vercel — cron invocations then arrive with `Authorization: Bearer <CRON_SECRET>` and are auto-validated.
 
@@ -104,3 +104,8 @@ You can also trigger the buy scan manually at any time: `GET /api/cron/scan?batc
 - `BUY_SCAN_TARGET_PERCENT` (default `7`) — target as % above the entry price in buy notifications.
 - `BUY_SCAN_DEFAULT_CAPITAL` (default `10000`) — rupees per trade used to size quantity when no monthly setup exists (otherwise the setup's `maxTradeCapital` is used).
 - `GEMINI_MODEL` (default `gemini-3.6-flash`) — AI model used to pick the best signal; falls back to `gemini-2.5-flash` on failure.
+
+## Sell-scan tuning (optional env vars)
+
+- `SELL_SCAN_DOWN_PERCENT` (default `3`) — an open position down more than this % from entry triggers a **sell signal** notification (`SELL_ALERT`).
+- `SELL_SCAN_UP_PERCENT` (default `5`) — an open position up more than this % from entry triggers a **hold signal** notification (`HOLD_ALERT`). Between the two thresholds no alert is sent.

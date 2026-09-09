@@ -9,7 +9,7 @@ Single-user backend for a personal Indian stock-market AI assistant.
 - Sends push notifications through Firebase Admin SDK.
 - Exposes portfolio, recommendation, notification, capital, and market summary APIs.
 - Defines weekday cron jobs for:
-  - 11:00 AM IST buy scan: `/api/cron/scan?batch=all` (scans all batches, picks the strongest candidates in the ₹40–₹150 band, and pushes buy signals)
+  - 12:00 PM IST buy scan: `/api/cron/scan?batch=all` (scans all batches, picks the strongest candidates in the ₹40–₹150 band, and pushes buy signals)
   - 1:30 PM IST portfolio/sell scan: `/api/cron/check-positions` (scans the Trade tab: sell signal when a position drops, hold signal when it gains)
 - Serves live watchlist quotes (poll `/api/market/live` or stream `/api/market/stream`) so the app's digits update like Angel One's feed.
 
@@ -60,6 +60,7 @@ http://localhost:3000/api
 2. `GET /api/notifications/test` — sends a test push through FCM. If it fails with a token error, the stored token is cleared automatically so the app can re-register.
 3. `GET /api/cron/scan?batch=all` — runs the buy scan immediately and returns a per-batch result summary.
 4. Check the `cronRuns` collection in Firestore for `buy_scan` entries (status: completed/failed/skipped) to see what the scan decided.
+5. `GET /api/cron/runs?job=buy_scan` (with `Authorization: Bearer <CRON_SECRET>`) — read-only view of the same `cronRuns` history without opening the Firebase console. Each entry records the date, status, and message (e.g. "No candidates found"), so you can confirm the cron actually fired and what it decided.
 
 ## Main API Endpoints
 
@@ -73,6 +74,7 @@ http://localhost:3000/api
 - `POST /api/notifications/register` with `{ "token": "FCM_TOKEN" }`
 - `POST /api/register-device` with `{ "token": "FCM_TOKEN" }`
 - `POST /api/notifications/test`
+- `GET /api/cron/runs?job=buy_scan` — read-only cron run history (requires `Authorization: Bearer <CRON_SECRET>`)
 - `GET /api/capital/current`
 - `POST /api/capital/budget` with `{ "capital": 50000, "riskLevel": "medium", "tradingStyle": "swing" }`
 - `POST /api/capital/profit` with `{ "amount": 2500 }`
@@ -81,7 +83,7 @@ http://localhost:3000/api
 
 `vercel.json` schedules weekday jobs in UTC (both fit on the Hobby plan's daily limit):
 
-- `30 5 * * 1-5` → `/api/cron/scan?batch=all` = 11:00 AM IST buy scan (up to 5 strong picks, ₹40–₹150 band)
+- `30 6 * * 1-5` → `/api/cron/scan?batch=all` = 12:00 PM IST buy scan (up to 5 strong picks, ₹40–₹150 band)
 - `0 8 * * 1-5` → `/api/cron/check-positions` = 1:30 PM IST sell scan (scans open positions: sell signal on down moves, hold signal on up moves)
 
 Set `CRON_SECRET` in Vercel — cron invocations then arrive with `Authorization: Bearer <CRON_SECRET>` and are auto-validated.

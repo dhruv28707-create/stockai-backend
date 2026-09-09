@@ -74,7 +74,7 @@ app.use(limiter);
 app.get("/api", (_req: Request, res: Response) => {
   // Version is a deployment fingerprint: check /api after deploying to confirm
   // the latest build is live.
-  sendSuccess(res, { service: "StockAI Backend", storage: "firebase", version: "1.7.0" });
+  sendSuccess(res, { service: "StockAI Backend", storage: "firebase", version: "1.8.0" });
 });
 
 app.get("/api/health", (_req: Request, res: Response) => {
@@ -755,7 +755,7 @@ app.post("/api/capital/profit", async (req: Request, res: Response) => {
 //
 // vercel.json schedules one daily run that scans the ₹40–₹150 watchlist and
 // notifies the best BUY_SCAN_TOP_PICKS opportunities (top-N, default 5):
-//   11:00 AM IST → /api/cron/scan  (no batch param → batch=all)
+//   12:00 PM IST → /api/cron/scan  (no batch param → batch=all)
 // Manual / external cron use (legacy single-batch mode, still works):
 //   12:00 IST → /api/cron/scan?batch=1
 // Manual re-run after today's scan already completed (e.g. debugging):
@@ -918,6 +918,37 @@ app.get("/api/cron/test-scan", async (req: Request, res: Response) => {
   } catch (err) {
     logger.error(`[test-scan] ${job} failed`, toErrorContext(err));
     sendError(res, 500, `Test scan failed: ${getErrorMessage(err)}`);
+  }
+});
+
+// ─── Cron Run History ─────────────────────────────────────────────────────────
+
+// Read-only view of the `cronRuns` collection — what the daily jobs decided
+// (completed/failed/skipped + message). Lets you confirm the cron actually
+// fired without opening the Firebase console: after 12:00 PM IST check
+// /api/cron/runs?job=buy_scan for today's entry, then /api/notifications for
+// the pushed signals.
+app.get("/api/cron/runs", async (req: Request, res: Response) => {
+  if (!isAuthorizedCronRequest(req)) {
+    sendError(res, 401, "Unauthorized cron request");
+    return;
+  }
+
+  const job = typeof req.query.job === "string" ? req.query.job : undefined;
+  const limit = Math.min(toPositiveNumber(req.query.limit, 20), 100);
+
+  let query: Query = getDb()
+    .collection("cronRuns")
+    .where("userId", "==", env.SINGLE_USER_ID);
+  if (job) query = query.where("job", "==", job);
+
+  try {
+    const snap = await fetchDocsSortedByCreatedAt(query, limit);
+    const items = snap.docs.map((doc) => normalizeDoc(doc.id, doc.data()));
+    sendSuccess(res, { items, count: items.length });
+  } catch (error) {
+    logger.error("[cron/runs] Failed to fetch", toErrorContext(error));
+    sendError(res, 500, "Failed to fetch cron runs");
   }
 });
 
@@ -1368,7 +1399,11 @@ async function runBuyScanAll(): Promise<BuyScanResult[]> {
 
   if (candidates.length === 0) {
     await logCronRun("buy_scan", 0, "completed", "No candidates found");
-    await markRunCompleted("buy_scan", "No candidates found");
+    // Deliberately NOT marking the day as completed: nothing was pushed, so
+    // there is no duplicate-batch risk, and a later trigger that day (manual
+    // re-run, a delayed/duplicate cron, an external cron) gets another chance
+    // to catch stocks that only started moving in the afternoon. Previously
+    // this marked the day completed and silently locked out any later scan.
     return [{ status: "completed", message: "No candidates found" }];
   }
 
@@ -1382,7 +1417,8 @@ async function runBuyScanAll(): Promise<BuyScanResult[]> {
 
   if (picks.length === 0) {
     await logCronRun("buy_scan", 0, "completed", "AI found no strong signal");
-    await markRunCompleted("buy_scan", "AI found no strong signal");
+    // Same as the no-candidates path: nothing was pushed, so keep the day open
+    // for a later trigger instead of marking it completed.
     return [{ status: "completed", message: "AI found no strong signal" }];
   }
 
@@ -1462,7 +1498,6 @@ async function runSellScan(batchIndex: number): Promise<SellScanResult> {
   const holdAtPercent = env.SELL_SCAN_HOLD_AT_PERCENT;
   const sellAtPercent = env.SELL_SCAN_SELL_AT_PERCENT;
   const resetBelowPercent = env.SELL_SCAN_RESET_BELOW_PERCENT;
-  const peakResetBelowPercent = resetBelowPercent;
   let alertsSent = 0;
 
   // Per-position state that survives cold starts and day boundaries. Once a
@@ -1481,7 +1516,9 @@ async function runSellScan(batchIndex: number): Promise<SellScanResult> {
       highPnlPercent?: number;
     } | undefined;
     if (data?.symbol && typeof data.highPnlPercent === "number") {
-      heldStateBySymbol.set(data.symbol.toUpperCase(), data);
+      heldStateBySymbol.set(data.symbol.toUpperCase(), {
+        highPnlPercent: data.highPnlPercent
+      });
     }
   }
 
@@ -1634,7 +1671,11 @@ async function fetchDocsSortedByCreatedAt(
     logger.warn("[firestore] Composite index missing — falling back to in-memory sort", {
       error: msg.slice(0, 200)
     });
-    const snap = await query.limit(limit * 5).get();
+    // Single-user app: fetch ALL matching docs (not limit*5, which returns an
+    // arbitrary doc-ID-ordered sample that can miss the newest documents — the
+    // exact bug that made the app show stale/missing notifications), then sort
+    // in memory by createdAt and take the requested limit.
+    const snap = await query.get();
     const docs = snap.docs
       .filter((doc) => doc.data().createdAt)
       .sort((a, b) => {

@@ -9,7 +9,7 @@ Single-user backend for a personal Indian stock-market AI assistant.
 - Sends push notifications through Firebase Admin SDK.
 - Exposes portfolio, recommendation, notification, capital, and market summary APIs.
 - Defines weekday cron jobs for:
-  - 12:00 PM IST buy scan: `/api/cron/scan?batch=all` (scans all batches, picks the strongest candidates in the ₹40–₹150 band, and pushes buy signals)
+  - 12:00 PM IST buy scan: `/api/cron/scan?batch=all` (scans all batches, picks the strongest candidates in the ₹40–₹150 band, and pushes buy signals; when no stock qualifies, it pushes a "⛔ No buy signal today — don't invest" advisory instead of staying silent)
   - 1:30 PM IST portfolio/sell scan: `/api/cron/check-positions` (scans the Trade tab: sell signal when a position drops, hold signal when it gains)
 - Serves live watchlist quotes (poll `/api/market/live` or stream `/api/market/stream`) so the app's digits update like Angel One's feed.
 
@@ -101,6 +101,7 @@ You can also trigger the buy scan manually at any time: `GET /api/cron/scan?batc
 - `BUY_SCAN_MAX_DISTANCE_FROM_HIGH_PERCENT` (default `1.5`) — candidate must be close to its intraday high, not fading after an early spike.
 - `BUY_SCAN_MIN_PRICE` (default `40`) / `BUY_SCAN_MAX_PRICE` (default `150`) — price band for candidates.
 - `BUY_SCAN_TOP_PICKS` (default `5`) — maximum number of strong picks the daily scan notifies; it can send fewer when conditions are weak.
+- On days with no qualifying stock, the scan pushes a "no buy signal today" advisory (once per day) instead of staying silent — so you know the scan ran and it's safe to skip investing.
 - `BUY_SCAN_MAX_PER_SECTOR` (default `2`) — maximum correlated picks from one sector per scan.
 - `BUY_SCAN_STOP_LOSS_PERCENT` (default `3`) — stop loss as % below the entry price in buy notifications.
 - `BUY_SCAN_TARGET_PERCENT` (default `7`) — target as % above the entry price in buy notifications.

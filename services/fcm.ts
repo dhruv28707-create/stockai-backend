@@ -277,7 +277,12 @@ function getNotificationChannel(type: string): { channelId: string; sound: strin
     return { channelId: "sell_signals", sound: "sell_signal" };
   }
 
-  if (type.includes("MARKET") || type.includes("HOLD")) {
+  if (
+    type.includes("MARKET") ||
+    type.includes("HOLD") ||
+    // "No qualified stock today" advisory — a market update, not a buy signal.
+    type.includes("NO_SIGNAL")
+  ) {
     return { channelId: "market_updates", sound: "market_update" };
   }
 

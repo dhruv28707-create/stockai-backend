@@ -74,7 +74,7 @@ app.use(limiter);
 app.get("/api", (_req: Request, res: Response) => {
   // Version is a deployment fingerprint: check /api after deploying to confirm
   // the latest build is live.
-  sendSuccess(res, { service: "StockAI Backend", storage: "firebase", version: "1.8.0" });
+  sendSuccess(res, { service: "StockAI Backend", storage: "firebase", version: "1.9.0" });
 });
 
 app.get("/api/health", (_req: Request, res: Response) => {
@@ -1354,6 +1354,33 @@ async function runBuyScan(
   return result;
 }
 
+/**
+ * Send the "no qualified stock today" advisory push so a quiet scan never
+ * ends in silence. Deduped once per IST day via the same Firestore-backed
+ * keys as buy signals. Deliberately does NOT mark the day completed — a
+ * later trigger can still find and notify a real signal if the market moves.
+ */
+async function notifyNoSignalToday(reason: string): Promise<boolean> {
+  const dedupKey = `NO_SIGNAL:${getISTDateKey()}`;
+  if (await isKeyNotified(dedupKey)) return false;
+
+  const push = await sendPushNotification(
+    "⛔ No buy signal today",
+    [
+      `No stock met today's quality filters (${reason}).`,
+      "Don't invest today — wait for a confirmed buy signal."
+    ].join("\n"),
+    "NO_SIGNAL",
+    "HIGH"
+  );
+
+  if (push.sent) {
+    await markKeyNotified(dedupKey);
+    return true;
+  }
+  return false;
+}
+
 async function runBuyScanAll(): Promise<BuyScanResult[]> {
   if (env.SCAN_DATA_SOURCE === "angelone" && !isAngelOneConfigured()) {
     await logCronRun("buy_scan", 0, "skipped", "Angel One not configured");
@@ -1398,13 +1425,30 @@ async function runBuyScanAll(): Promise<BuyScanResult[]> {
   }
 
   if (candidates.length === 0) {
-    await logCronRun("buy_scan", 0, "completed", "No candidates found");
+    const noSignalSent = await notifyNoSignalToday(
+      "no stock met the price/volume/momentum filters"
+    );
+    await logCronRun(
+      "buy_scan",
+      0,
+      "completed",
+      noSignalSent
+        ? "No candidates found — no-signal advisory sent"
+        : "No candidates found"
+    );
     // Deliberately NOT marking the day as completed: nothing was pushed, so
     // there is no duplicate-batch risk, and a later trigger that day (manual
     // re-run, a delayed/duplicate cron, an external cron) gets another chance
     // to catch stocks that only started moving in the afternoon. Previously
     // this marked the day completed and silently locked out any later scan.
-    return [{ status: "completed", message: "No candidates found" }];
+    return [
+      {
+        status: "completed",
+        message: noSignalSent
+          ? "No candidates found — no-signal advisory sent"
+          : "No candidates found"
+      }
+    ];
   }
 
   const topCandidates = candidates
@@ -1416,10 +1460,27 @@ async function runBuyScanAll(): Promise<BuyScanResult[]> {
   );
 
   if (picks.length === 0) {
-    await logCronRun("buy_scan", 0, "completed", "AI found no strong signal");
+    const noSignalSent = await notifyNoSignalToday(
+      "the AI found no strong signal"
+    );
+    await logCronRun(
+      "buy_scan",
+      0,
+      "completed",
+      noSignalSent
+        ? "AI found no strong signal — no-signal advisory sent"
+        : "AI found no strong signal"
+    );
     // Same as the no-candidates path: nothing was pushed, so keep the day open
     // for a later trigger instead of marking it completed.
-    return [{ status: "completed", message: "AI found no strong signal" }];
+    return [
+      {
+        status: "completed",
+        message: noSignalSent
+          ? "AI found no strong signal — no-signal advisory sent"
+          : "AI found no strong signal"
+      }
+    ];
   }
 
   const results: BuyScanResult[] = [];

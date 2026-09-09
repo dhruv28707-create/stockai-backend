@@ -75,9 +75,12 @@ http://localhost:3000/api
 - `POST /api/register-device` with `{ "token": "FCM_TOKEN" }`
 - `POST /api/notifications/test`
 - `GET /api/cron/runs?job=buy_scan` — read-only cron run history (requires `Authorization: Bearer <CRON_SECRET>`)
+- `POST /api/trade/buy` with `{ "symbol": "CAMLINFINE", "quantity": 2, "entryPrice": 103.61 }` — records a purchase, opens a position, and deducts the invested amount from remaining capital
+- `POST /api/trade/sell` with `{ "symbol": "CAMLINFINE", "sellPrice": 103.61 }` — closes an open position: marks it closed with realized P&L, removes the holding from the portfolio, and frees the invested amount back to remaining capital. Omit `sellPrice` to remove a position at its invested amount (e.g. deleting a dummy trade)
 - `GET /api/capital/current`
 - `POST /api/capital/budget` with `{ "capital": 50000, "riskLevel": "medium", "tradingStyle": "swing" }`
 - `POST /api/capital/profit` with `{ "amount": 2500 }`
+- `POST /api/capital/loss` with `{ "amount": 1500 }` — logs a loss from a closed trade: records it in `lossTaken` and deducts it from remaining capital.
 
 ## Vercel Cron
 

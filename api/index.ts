@@ -74,7 +74,7 @@ app.use(limiter);
 app.get("/api", (_req: Request, res: Response) => {
   // Version is a deployment fingerprint: check /api after deploying to confirm
   // the latest build is live.
-  sendSuccess(res, { service: "StockAI Backend", storage: "firebase", version: "1.9.0" });
+  sendSuccess(res, { service: "StockAI Backend", storage: "firebase", version: "2.0.0" });
 });
 
 app.get("/api/health", (_req: Request, res: Response) => {
@@ -657,6 +657,119 @@ app.post("/api/trade/buy", async (req: Request, res: Response) => {
   }
 });
 
+/**
+ * Close an open position (sell / remove a trade):
+ *   1. Marks the position "closed" with the exit price + realized P&L.
+ *   2. Removes the holding from the portfolio document.
+ *   3. Frees the invested amount back into the month's remaining capital so it
+ *      can be reinvested (losses / profits are then accounted for through the
+ *      separate profit/loss logging endpoints).
+ *   4. Clears any sell-scan "held" monitoring state for the symbol.
+ * Idempotent per symbol: an already-closed symbol returns a 404 instead of
+ * double-closing.
+ */
+app.post("/api/trade/sell", async (req: Request, res: Response) => {
+  try {
+    const symbol = String(req.body?.symbol ?? "")
+      .trim()
+      .toUpperCase();
+    if (!VALID_SYMBOL.test(symbol)) {
+      sendError(res, 400, "A valid stock symbol is required");
+      return;
+    }
+
+    // Only an open position can be sold — an already-closed symbol is a 404.
+    const openSnap = await getDb()
+      .collection(collectionNames.positions)
+      .where("userId", "==", env.SINGLE_USER_ID)
+      .where("status", "==", "open")
+      .where("symbol", "==", symbol)
+      .limit(1)
+      .get();
+
+    if (openSnap.empty) {
+      sendError(res, 404, `No open position for ${symbol}`);
+      return;
+    }
+
+    const doc = openSnap.docs[0];
+    const position = normalizeDoc(doc.id, doc.data());
+    const quantity = Math.floor(toPositiveNumber(position.quantity, 0));
+    const entryPrice = toPositiveNumber(position.entryPrice ?? position.entry, 0);
+    const investedAmount =
+      Math.round(
+        toPositiveNumber(position.investedAmount, quantity * entryPrice) * 100
+      ) / 100;
+
+    // Optional sell price (quantity × sellPrice = proceeds). Without one — e.g.
+    // removing a dummy position — the invested amount is freed back to capital.
+    const sellPrice = toPositiveNumber(
+      req.body?.sellPrice ?? req.body?.price ?? req.body?.exitPrice,
+      0
+    );
+    const proceeds = sellPrice
+      ? Math.round(quantity * sellPrice * 100) / 100
+      : investedAmount;
+    const realizedPnl = Math.round((proceeds - investedAmount) * 100) / 100;
+
+    const now = Timestamp.now();
+
+    // 1. Close the position (Trade tab + portfolio openPositions).
+    await doc.ref.set(
+      {
+        status: "closed",
+        exitPrice: sellPrice || entryPrice,
+        exitDate: now,
+        realizedPnl,
+        proceeds,
+        updatedAt: now
+      },
+      { merge: true }
+    );
+
+    // 2. Remove the holding from the portfolio document.
+    await removeHoldingFromPortfolio(symbol);
+
+    // 3. Return the freed capital to this month's remaining capital.
+    const month = getCurrentMonth();
+    const setup = await getMonthlySetup(month);
+    if (setup) {
+      const remaining = Math.max(0, Number(setup.remainingCapital) + proceeds);
+      await getDb()
+        .collection(collectionNames.monthlySetup)
+        .doc(`${env.SINGLE_USER_ID}_${month}`)
+        .set(
+          { remainingCapital: remaining, updatedAt: Timestamp.now() },
+          { merge: true }
+        );
+    }
+
+    // 4. Drop any sell-scan "held" monitoring state for the symbol.
+    await clearHeldState(symbol).catch(() => undefined);
+
+    sendSuccess(res, {
+      sold: true,
+      symbol,
+      quantity,
+      entryPrice,
+      sellPrice: sellPrice || entryPrice,
+      proceeds,
+      realizedPnl,
+      message: `Sold ${quantity} ${symbol} — ₹${proceeds.toFixed(2)} freed back to capital`,
+      position: normalizeDoc(doc.id, {
+        ...position,
+        status: "closed",
+        exitPrice: sellPrice || entryPrice,
+        realizedPnl,
+        proceeds
+      })
+    });
+  } catch (error) {
+    logger.error("[trade] Failed to record sell", toErrorContext(error));
+    sendError(res, 500, "Failed to record sell trade");
+  }
+});
+
 // ─── Capital & Monthly Setup ──────────────────────────────────────────────────
 
 app.get("/api/capital/current", async (_req: Request, res: Response) => {
@@ -731,23 +844,75 @@ app.post("/api/capital/profit", async (req: Request, res: Response) => {
 
     const month =
       typeof req.body?.month === "string" ? req.body.month : getCurrentMonth();
-    await getDb()
-      .collection(collectionNames.monthlySetup)
-      .doc(`${env.SINGLE_USER_ID}_${month}`)
-      .set(
-        {
-          userId: env.SINGLE_USER_ID,
-          month,
-          profitTaken: FieldValue.increment(amount),
-          updatedAt: Timestamp.now()
-        },
-        { merge: true }
-      );
+    const docId = `${env.SINGLE_USER_ID}_${month}`;
+    const setup = await getMonthlySetup(month);
 
-    sendSuccess(res, { logged: true });
+    const now = Timestamp.now();
+    const base: Record<string, unknown> = {
+      userId: env.SINGLE_USER_ID,
+      month,
+      profitTaken: FieldValue.increment(amount),
+      updatedAt: now
+    };
+
+    // Profit becomes reinvestable: add it back to remaining capital so the user
+    // doesn't have to manually re-enter capital after every winning trade.
+    if (setup) {
+      base.remainingCapital = Number(setup.remainingCapital) + amount;
+    }
+
+    await getDb().collection(collectionNames.monthlySetup).doc(docId).set(base, {
+      merge: true
+    });
+
+    sendSuccess(res, { logged: true, profitTaken: amount });
   } catch (error) {
     logger.error("[capital] Failed to log profit", toErrorContext(error));
     sendError(res, 500, "Failed to log profit");
+  }
+});
+
+/**
+ * Log a loss from a closed trade so the month's capital reflects reality:
+ *   - records it in `lossTaken` (the profit/loss ledger)
+ *   - deducts it from `remainingCapital` (money lost is no longer investable)
+ * A loss can be logged any time — it does not require the position to still be
+ * open (the user may have exited the trade outside the app).
+ */
+app.post("/api/capital/loss", async (req: Request, res: Response) => {
+  try {
+    const amount = toPositiveNumber(req.body?.amount, 0);
+    if (!amount) {
+      sendError(res, 400, "Valid loss amount is required");
+      return;
+    }
+
+    const month =
+      typeof req.body?.month === "string" ? req.body.month : getCurrentMonth();
+    const docId = `${env.SINGLE_USER_ID}_${month}`;
+    const setup = await getMonthlySetup(month);
+
+    const now = Timestamp.now();
+    const base: Record<string, unknown> = {
+      userId: env.SINGLE_USER_ID,
+      month,
+      lossTaken: FieldValue.increment(amount),
+      updatedAt: now
+    };
+
+    // Deduct from remaining capital, never below zero.
+    if (setup) {
+      base.remainingCapital = Math.max(0, Number(setup.remainingCapital) - amount);
+    }
+
+    await getDb().collection(collectionNames.monthlySetup).doc(docId).set(base, {
+      merge: true
+    });
+
+    sendSuccess(res, { logged: true, lossTaken: amount });
+  } catch (error) {
+    logger.error("[capital] Failed to log loss", toErrorContext(error));
+    sendError(res, 500, "Failed to log loss");
   }
 });
 
@@ -1872,6 +2037,43 @@ async function clearHeldState(symbol: string): Promise<void> {
  * Portfolio tab can render bought stocks directly from `holdings`, alongside
  * the openPositions list derived from the positions collection.
  */
+/**
+ * Remove a holding from the single portfolio document (used when a position is
+ * closed/sold), recomputing holdingsCount and investedAmount. A symbol with no
+ * holding is a no-op. Mirror of addHoldingToPortfolio.
+ */
+async function removeHoldingFromPortfolio(symbol: string): Promise<void> {
+  const snap = await getDb()
+    .collection(collectionNames.portfolio)
+    .where("userId", "==", env.SINGLE_USER_ID)
+    .limit(1)
+    .get();
+
+  const doc = snap.docs[0];
+  if (!doc) return;
+
+  const holdings = Array.isArray(doc.data().holdings)
+    ? (doc.data().holdings as Record<string, unknown>[]).filter(
+        (h) => String(h.symbol ?? "").toUpperCase() !== symbol.toUpperCase()
+      )
+    : [];
+
+  const investedAmount =
+    Math.round(
+      holdings.reduce((sum, h) => sum + (Number(h.investedAmount) || 0), 0) * 100
+    ) / 100;
+
+  await doc.ref.set(
+    {
+      holdings,
+      holdingsCount: holdings.length,
+      investedAmount,
+      updatedAt: Timestamp.now()
+    },
+    { merge: true }
+  );
+}
+
 async function addHoldingToPortfolio(holding: Record<string, unknown>): Promise<void> {
   const snap = await getDb()
     .collection(collectionNames.portfolio)

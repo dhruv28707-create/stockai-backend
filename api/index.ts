@@ -74,7 +74,7 @@ app.use(limiter);
 app.get("/api", (_req: Request, res: Response) => {
   // Version is a deployment fingerprint: check /api after deploying to confirm
   // the latest build is live.
-  sendSuccess(res, { service: "StockAI Backend", storage: "firebase", version: "2.0.0" });
+  sendSuccess(res, { service: "StockAI Backend", storage: "firebase", version: "2.0.1" });
 });
 
 app.get("/api/health", (_req: Request, res: Response) => {
@@ -961,20 +961,39 @@ app.get("/api/cron/scan", async (req: Request, res: Response) => {
     const todayState = await getTodayRunState("buy_scan");
 
     if (!force && todayState.status === "completed") {
-      const message = "Buy scan already completed today — skipping duplicate run";
-      logger.info("[buy_scan] Skipped (already completed today)", {
-        date: getISTDateKey(),
-        completedAt: todayState.completedAt?.toDate().toISOString()
-      });
-      await logCronRun("buy_scan", 0, "skipped", message);
-      res.status(200).json({
-        status: "skipped",
-        job: "buy_scan",
-        batch: "all",
-        reason: "already_completed_today",
-        date: getISTDateKey()
-      });
-      return;
+      // Stale-guard healing: older builds marked the day "completed" WITHOUT
+      // delivering any push (the old silent "No candidates found" path).
+      // Honoring that stale marker now would lock the day into total silence
+      // even though this build would send the no-signal advisory. Only skip
+      // when a buy-related push (BUY:/NO_SIGNAL:/SCAN_FAILED:buy_scan: key)
+      // was actually recorded for today — otherwise re-run the scan.
+      if (!(await buyPushDeliveredToday())) {
+        logger.warn(
+          "[buy_scan] Day marked completed but no buy push recorded — ignoring stale guard and re-running",
+          { date: getISTDateKey() }
+        );
+        await logCronRun(
+          "buy_scan",
+          0,
+          "accepted",
+          "Stale completed guard ignored — no push delivered today, re-running scan"
+        );
+      } else {
+        const message = "Buy scan already completed today — skipping duplicate run";
+        logger.info("[buy_scan] Skipped (already completed today)", {
+          date: getISTDateKey(),
+          completedAt: todayState.completedAt?.toDate().toISOString()
+        });
+        await logCronRun("buy_scan", 0, "skipped", message);
+        res.status(200).json({
+          status: "skipped",
+          job: "buy_scan",
+          batch: "all",
+          reason: "already_completed_today",
+          date: getISTDateKey()
+        });
+        return;
+      }
     }
 
     try {
@@ -988,6 +1007,8 @@ app.get("/api/cron/scan", async (req: Request, res: Response) => {
       });
     } catch (err) {
       logger.error("[buy_scan] scan-all failed", toErrorContext(err));
+      // Heartbeat: a failing scan must never be a silent day.
+      await notifyScanFailed("buy_scan", getErrorMessage(err));
       sendError(res, 500, `Buy scan failed: ${getErrorMessage(err)}`);
     }
     return;
@@ -1495,6 +1516,8 @@ async function runBuyScan(
     } catch (err) {
       const message = getErrorMessage(err);
       await logCronRun("buy_scan", batchIndex, "failed", message);
+      // Heartbeat: a failing scan must never be a silent day.
+      await notifyScanFailed("buy_scan", message);
       return { status: "failed", message };
     }
   }
@@ -1502,16 +1525,22 @@ async function runBuyScan(
   const candidates = buildBuyCandidates(stocks, quoteMap);
 
   if (candidates.length === 0) {
-    await logCronRun("buy_scan", batchIndex, "completed", "No candidates found");
-    return { status: "no_candidates", message: "No candidates found" };
+    const noSignal = await notifyNoSignalToday(
+      "no stock met the price/volume/momentum filters"
+    );
+    const message = describeNoSignalResult("No candidates found", noSignal);
+    await logCronRun("buy_scan", batchIndex, "completed", message);
+    return { status: "no_candidates", message };
   }
 
   // Legacy single-batch mode (external crons): notify the 1 best pick.
   const picks = await analyzeWithAI(candidates.slice(0, 10), "buy", 1);
 
   if (picks.length === 0) {
-    await logCronRun("buy_scan", batchIndex, "completed", "AI found no strong signal");
-    return { status: "completed", message: "AI found no strong signal" };
+    const noSignal = await notifyNoSignalToday("the AI found no strong signal");
+    const message = describeNoSignalResult("AI found no strong signal", noSignal);
+    await logCronRun("buy_scan", batchIndex, "completed", message);
+    return { status: "completed", message };
   }
 
   const result = await handleBuyPick(batchIndex, picks[0]);
@@ -1520,20 +1549,96 @@ async function runBuyScan(
 }
 
 /**
+ * True if a buy-scan push (a BUY:/NO_SIGNAL:/SCAN_FAILED:buy_scan: dedup key)
+ * was actually recorded for today. Used to heal the stale daily run-guard:
+ * older builds marked days "completed" without ever delivering a push, and
+ * skipping on that stale marker left the user with total silence. Fails open
+ * (returns false → let the scan run) so a read error can never create silence.
+ */
+async function buyPushDeliveredToday(): Promise<boolean> {
+  try {
+    const snap = await getDb()
+      .collection(collectionNames.cronState)
+      .doc(`dedup_${getISTDateKey()}`)
+      .get();
+    const keys = Array.isArray(snap.data()?.keys) ? (snap.data()?.keys as string[]) : [];
+    return keys.some(
+      (key) =>
+        key.startsWith("BUY:") ||
+        key.startsWith("NO_SIGNAL:") ||
+        key.startsWith("SCAN_FAILED:buy_scan:")
+    );
+  } catch (err) {
+    logger.warn("[buy_scan] Could not verify today's push state — proceeding with scan", {
+      error: getErrorMessage(err)
+    });
+    return false;
+  }
+}
+
+interface NoSignalResult {
+  sent: boolean;
+  alreadyNotified: boolean;
+  error?: string;
+}
+
+/**
  * Send the "no qualified stock today" advisory push so a quiet scan never
  * ends in silence. Deduped once per IST day via the same Firestore-backed
  * keys as buy signals. Deliberately does NOT mark the day completed — a
  * later trigger can still find and notify a real signal if the market moves.
+ * Returns WHY nothing was sent (already notified / push error) so callers can
+ * record an honest message in cronRuns instead of a misleading "completed".
  */
-async function notifyNoSignalToday(reason: string): Promise<boolean> {
+async function notifyNoSignalToday(reason: string): Promise<NoSignalResult> {
   const dedupKey = `NO_SIGNAL:${getISTDateKey()}`;
-  if (await isKeyNotified(dedupKey)) return false;
+  if (await isKeyNotified(dedupKey)) {
+    return { sent: false, alreadyNotified: true };
+  }
 
   const push = await sendPushNotification(
     "⛔ No buy signal today",
     [
       `No stock met today's quality filters (${reason}).`,
       "Don't invest today — wait for a confirmed buy signal."
+    ].join("\n"),
+    "NO_SIGNAL",
+    "HIGH"
+  );
+
+  if (push.sent) {
+    await markKeyNotified(dedupKey);
+    return { sent: true, alreadyNotified: false };
+  }
+  return { sent: false, alreadyNotified: false, error: push.error };
+}
+
+/** Human-readable cronRuns message describing a no-signal advisory outcome. */
+function describeNoSignalResult(base: string, result: NoSignalResult): string {
+  if (result.sent) return `${base} — no-signal advisory sent`;
+  if (result.alreadyNotified) return `${base} — no-signal advisory already sent today`;
+  return `${base} — no-signal advisory push failed (${result.error ?? "unknown error"})`;
+}
+
+/**
+ * Heartbeat push so a scan day never ends in silence even when the scan
+ * itself fails (e.g. the quote source errors out). Deduped once per job per
+ * IST day. The attempt is also recorded in the notifications collection, so
+ * the app's notification list shows the failure even if FCM can't deliver.
+ */
+async function notifyScanFailed(
+  job: "buy_scan" | "sell_scan",
+  reason: string
+): Promise<boolean> {
+  const dedupKey = `SCAN_FAILED:${job}:${getISTDateKey()}`;
+  if (await isKeyNotified(dedupKey)) return false;
+
+  const isBuy = job === "buy_scan";
+  const push = await sendPushNotification(
+    isBuy ? "⚠️ Buy scan failed today" : "⚠️ Sell scan failed today",
+    [
+      `The ${isBuy ? "daily buy scan" : "sell scan"} hit an error (${reason}).`,
+      "It will retry on the next scheduled trigger."
     ].join("\n"),
     "NO_SIGNAL",
     "HIGH"
@@ -1560,6 +1665,8 @@ async function runBuyScanAll(): Promise<BuyScanResult[]> {
   } catch (err) {
     const message = getErrorMessage(err);
     await logCronRun("buy_scan", 0, "failed", message);
+    // Heartbeat: a failing scan must never be a silent day.
+    await notifyScanFailed("buy_scan", message);
     return [{ status: "failed", message }];
   }
 
@@ -1590,30 +1697,17 @@ async function runBuyScanAll(): Promise<BuyScanResult[]> {
   }
 
   if (candidates.length === 0) {
-    const noSignalSent = await notifyNoSignalToday(
+    const noSignal = await notifyNoSignalToday(
       "no stock met the price/volume/momentum filters"
     );
-    await logCronRun(
-      "buy_scan",
-      0,
-      "completed",
-      noSignalSent
-        ? "No candidates found — no-signal advisory sent"
-        : "No candidates found"
-    );
+    const message = describeNoSignalResult("No candidates found", noSignal);
+    await logCronRun("buy_scan", 0, "completed", message);
     // Deliberately NOT marking the day as completed: nothing was pushed, so
     // there is no duplicate-batch risk, and a later trigger that day (manual
     // re-run, a delayed/duplicate cron, an external cron) gets another chance
     // to catch stocks that only started moving in the afternoon. Previously
     // this marked the day completed and silently locked out any later scan.
-    return [
-      {
-        status: "completed",
-        message: noSignalSent
-          ? "No candidates found — no-signal advisory sent"
-          : "No candidates found"
-      }
-    ];
+    return [{ status: "completed", message }];
   }
 
   const topCandidates = candidates
@@ -1625,27 +1719,12 @@ async function runBuyScanAll(): Promise<BuyScanResult[]> {
   );
 
   if (picks.length === 0) {
-    const noSignalSent = await notifyNoSignalToday(
-      "the AI found no strong signal"
-    );
-    await logCronRun(
-      "buy_scan",
-      0,
-      "completed",
-      noSignalSent
-        ? "AI found no strong signal — no-signal advisory sent"
-        : "AI found no strong signal"
-    );
+    const noSignal = await notifyNoSignalToday("the AI found no strong signal");
+    const message = describeNoSignalResult("AI found no strong signal", noSignal);
+    await logCronRun("buy_scan", 0, "completed", message);
     // Same as the no-candidates path: nothing was pushed, so keep the day open
     // for a later trigger instead of marking it completed.
-    return [
-      {
-        status: "completed",
-        message: noSignalSent
-          ? "AI found no strong signal — no-signal advisory sent"
-          : "AI found no strong signal"
-      }
-    ];
+    return [{ status: "completed", message }];
   }
 
   const results: BuyScanResult[] = [];
@@ -1717,6 +1796,8 @@ async function runSellScan(batchIndex: number): Promise<SellScanResult> {
   } catch (err) {
     const message = getErrorMessage(err);
     await logCronRun("sell_scan", batchIndex, "failed", message);
+    // Heartbeat: a failing scan must never be a silent day.
+    await notifyScanFailed("sell_scan", message);
     return { status: "failed", message, alertsSent: 0 };
   }
 

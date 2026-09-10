@@ -56,11 +56,17 @@ http://localhost:3000/api
 
 ## Troubleshooting notifications
 
-1. `GET /api/notifications/status` — shows whether a device token is registered and the last notification attempt.
-2. `GET /api/notifications/test` — sends a test push through FCM. If it fails with a token error, the stored token is cleared automatically so the app can re-register.
-3. `GET /api/cron/scan?batch=all` — runs the buy scan immediately and returns a per-batch result summary.
-4. Check the `cronRuns` collection in Firestore for `buy_scan` entries (status: completed/failed/skipped) to see what the scan decided.
-5. `GET /api/cron/runs?job=buy_scan` (with `Authorization: Bearer <CRON_SECRET>`) — read-only view of the same `cronRuns` history without opening the Firebase console. Each entry records the date, status, and message (e.g. "No candidates found"), so you can confirm the cron actually fired and what it decided.
+The scan is designed to never end a day in silence: every run produces either buy signals, a "⛔ No buy signal today" advisory, or a "⚠️ scan failed" alert. If you still got nothing, work through this checklist in order:
+
+1. `GET /api` — confirm the deployed version is `2.0.1` (version is the deployment fingerprint). If it shows an older version, the fix isn't live yet.
+2. `GET /api/cron/runs?job=buy_scan` (with `Authorization: Bearer <CRON_SECRET>`) — read-only history of what the scan decided (status: completed/failed/skipped + message). After 12:00 PM IST there must be an entry for today; its message tells you exactly what happened (e.g. "No candidates found — no-signal advisory sent" or "...advisory push failed (<reason>)").
+3. `GET /api/notifications/status` — shows whether a device token is registered and the last notification attempt. If `hasToken` is false or the last attempt failed with a token error, the Android app must re-register its FCM token.
+4. `GET /api/notifications?status=sent` — the pushes FCM actually delivered today. If the push was "sent" here but nothing appeared on the phone, the device side dropped it (most commonly a missing `market_updates` notification channel on Android 8+ — make sure the app creates the `buy_signals`, `sell_signals`, and `market_updates` channels on startup).
+5. `GET /api/notifications/test` — sends a test push through FCM. If it fails with a token error, the stored token is cleared automatically so the app can re-register.
+6. `GET /api/cron/scan?batch=all` — runs the buy scan immediately and returns a per-batch result summary (add `?force=1` to bypass the once-per-day run guard).
+7. Check the `cronRuns` collection in Firestore for `buy_scan` entries to cross-check the same history without opening the API.
+
+Known healing behavior: if a day is marked "completed" but no push was actually delivered (stale marker from older builds), the scan re-runs instead of skipping, so a silent day self-heals on the next trigger.
 
 ## Main API Endpoints
 
